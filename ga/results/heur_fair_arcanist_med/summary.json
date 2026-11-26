@@ -1,0 +1,83 @@
+{
+  "config": {
+    "run_id": "heuristic_fair_arcanist_medium_s1153",
+    "model": "heuristic",
+    "obs": "fair",
+    "cls": "arcanist",
+    "tier": "medium",
+    "pop": 36,
+    "gens": 50,
+    "seeds": 5,
+    "train_seeds": [
+      6438,
+      16130,
+      53111,
+      42751,
+      47293
+    ],
+    "held_out_seeds": [
+      4951,
+      9320,
+      13689,
+      18058,
+      22427,
+      26796,
+      31165,
+      35534,
+      39903,
+      44257
+    ],
+    "workers": 10,
+    "seed": 1153,
+    "max_turns": 350,
+    "stall_turns": 140,
+    "out_dir": "C:\\Users\\joaog\\workspace_v12\\mspgame\\ga\\results\\heur_fair_arcanist_med"
+  },
+  "train_stats": {
+    "mean_fit": 7939.4,
+    "max_fit": 10720.0,
+    "min_fit": 3976.0,
+    "std_fit": 2245.939411471289,
+    "mean_floor": 4.0,
+    "max_floor": 5.0,
+    "mean_kills": 18.4,
+    "max_kills": 27.0,
+    "total_boss_kills": 1.0,
+    "mean_gold": 309.0,
+    "mean_explored": 2663.2,
+    "mean_turns": 324.8,
+    "mean_wall_bumps": 0.0
+  },
+  "held_out_float": {
+    "mean_fit": 1985.9,
+    "max_fit": 3717.0,
+    "min_fit": 375.0,
+    "std_fit": 1262.0569281930193,
+    "mean_floor": 1.7,
+    "max_floor": 3.0,
+    "mean_kills": 3.9,
+    "max_kills": 6.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 67.8,
+    "mean_explored": 739.8,
+    "mean_turns": 120.5,
+    "mean_wall_bumps": 0.0
+  },
+  "held_out_int8": {
+    "mean_fit": 2291.4,
+    "max_fit": 4002.0,
+    "min_fit": 375.0,
+    "std_fit": 1340.892255179364,
+    "mean_floor": 1.8,
+    "max_floor": 3.0,
+    "mean_kills": 4.3,
+    "max_kills": 7.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 72.1,
+    "mean_explored": 856.4,
+    "mean_turns": 137.8,
+    "mean_wall_bumps": 0.0
+  },
+  "quantization_retention": 1.1538,
+  "wall_clock_s": 137.11
+}

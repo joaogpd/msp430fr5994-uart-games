@@ -29,18 +29,18 @@ EXPERIMENTS = [
     # 1. Progressive Tiers (Knight, Fair Fog-of-War)
     ("heur_fair_knight_smoke",  "heuristic", "fair",       "knight",   "smoke",  None, None),
     ("mlp_fair_knight_smoke",   "mlp",       "fair",       "knight",   "smoke",  None, None),
-    ("heur_fair_knight_medium", "heuristic", "fair",       "knight",   "medium", None, None),
-    ("mlp_fair_knight_medium",  "mlp",       "fair",       "knight",   "medium", None, None),
-    ("heur_fair_knight_deep",   "heuristic", "fair",       "knight",   "deep",   72,   120),
-    ("mlp_fair_knight_deep",    "mlp",       "fair",       "knight",   "deep",   72,   120),
+    ("heur_fair_knight_medium", "heuristic", "fair",       "knight",   "medium", 36,   50),
+    ("mlp_fair_knight_medium",  "mlp",       "fair",       "knight",   "medium", 36,   50),
+    ("heur_fair_knight_deep",   "heuristic", "fair",       "knight",   "deep",   60,   100),
+    ("mlp_fair_knight_deep",    "mlp",       "fair",       "knight",   "deep",   60,   100),
     # 2. Observability Ablation (Knight, Omniscient, Medium)
-    ("heur_omni_knight_medium", "heuristic", "omniscient", "knight",   "medium", None, None),
-    ("mlp_omni_knight_medium",  "mlp",       "omniscient", "knight",   "medium", None, None),
+    ("heur_omni_knight_medium", "heuristic", "omniscient", "knight",   "medium", 36,   50),
+    ("mlp_omni_knight_medium",  "mlp",       "omniscient", "knight",   "medium", 36,   50),
     # 3. Class Specialists (Arcanist & Rogue, Fair, Medium)
-    ("heur_fair_arcanist_med",  "heuristic", "fair",       "arcanist", "medium", None, None),
-    ("mlp_fair_arcanist_med",   "mlp",       "fair",       "arcanist", "medium", None, None),
-    ("heur_fair_rogue_med",     "heuristic", "fair",       "rogue",    "medium", None, None),
-    ("mlp_fair_rogue_med",      "mlp",       "fair",       "rogue",    "medium", None, None),
+    ("heur_fair_arcanist_med",  "heuristic", "fair",       "arcanist", "medium", 36,   50),
+    ("mlp_fair_arcanist_med",   "mlp",       "fair",       "arcanist", "medium", 36,   50),
+    ("heur_fair_rogue_med",     "heuristic", "fair",       "rogue",    "medium", 36,   50),
+    ("mlp_fair_rogue_med",      "mlp",       "fair",       "rogue",    "medium", 36,   50),
 ]
 
 
@@ -52,6 +52,15 @@ def main() -> None:
 
     for idx, (exp_id, model, obs, cls, tier, pop_ov, gens_ov) in enumerate(EXPERIMENTS, 1):
         out_dir = RESULTS_DIR / exp_id
+        summary_file = out_dir / "summary.json"
+        if summary_file.exists():
+            print(f"\n[{idx}/{len(EXPERIMENTS)}] Resuming cached {exp_id}...", flush=True)
+            summary = json.loads(summary_file.read_text(encoding="utf-8"))
+            summary["exp_id"] = exp_id
+            summary["wall_s"] = round(summary.get("wall_clock_s", 0.0), 2)
+            summaries.append(summary)
+            continue
+
         cmd = [
             sys.executable, "-m", "ga.evolve",
             "--model", model,
@@ -71,15 +80,15 @@ def main() -> None:
         t0 = time.perf_counter()
         subprocess.run(cmd, cwd=str(ROOT), check=True)
         dt = time.perf_counter() - t0
-        summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+        summary = json.loads(summary_file.read_text(encoding="utf-8"))
         summary["exp_id"] = exp_id
         summary["wall_s"] = round(dt, 2)
         summaries.append(summary)
         hf = summary["held_out_float"]
         hq = summary["held_out_int8"]
         print(
-            f"  -> DONE in {dt:.1f}s | Held-out Float: fit={hf['mean_fitness']:.1f} fl={hf['mean_floor']:.2f} "
-            f"kills={hf['mean_kills']:.1f} | Int8: fit={hq['mean_fitness']:.1f} fl={hq['mean_floor']:.2f}",
+            f"  -> DONE in {dt:.1f}s | Held-out Float: fit={hf['mean_fit']:.1f} fl={hf['mean_floor']:.2f} "
+            f"kills={hf['mean_kills']:.1f} | Int8: fit={hq['mean_fit']:.1f} fl={hq['mean_floor']:.2f}",
             flush=True,
         )
 

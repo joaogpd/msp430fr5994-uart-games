@@ -1,0 +1,13 @@
+{
+  "port": "COM4",
+  "baud": 115200,
+  "genome": "ga\\results\\heur_fair_knight_deep\\best_genome.json",
+  "turns": 59,
+  "max_floor": 1,
+  "max_gold": 6,
+  "deaths": 0,
+  "bel_count": 0,
+  "dsr_count": 3,
+  "final_banner": "MSP430 DUNGEON FL:01 BEST:01 SEED:350F  BIOME: STONE CRYPT",
+  "final_status": ""
+}

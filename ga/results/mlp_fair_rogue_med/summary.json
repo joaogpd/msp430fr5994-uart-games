@@ -1,0 +1,83 @@
+{
+  "config": {
+    "run_id": "mlp_fair_rogue_medium_s1204",
+    "model": "mlp",
+    "obs": "fair",
+    "cls": "rogue",
+    "tier": "medium",
+    "pop": 36,
+    "gens": 50,
+    "seeds": 5,
+    "train_seeds": [
+      20576,
+      5460,
+      4650,
+      29927,
+      28582
+    ],
+    "held_out_seeds": [
+      4951,
+      9320,
+      13689,
+      18058,
+      22427,
+      26796,
+      31165,
+      35534,
+      39903,
+      44257
+    ],
+    "workers": 10,
+    "seed": 1204,
+    "max_turns": 350,
+    "stall_turns": 140,
+    "out_dir": "C:\\Users\\joaog\\workspace_v12\\mspgame\\ga\\results\\mlp_fair_rogue_med"
+  },
+  "train_stats": {
+    "mean_fit": 3327.8,
+    "max_fit": 4964.0,
+    "min_fit": 2137.0,
+    "std_fit": 919.6804662490119,
+    "mean_floor": 1.8,
+    "max_floor": 2.0,
+    "mean_kills": 3.4,
+    "max_kills": 6.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 56.0,
+    "mean_explored": 1398.4,
+    "mean_turns": 162.0,
+    "mean_wall_bumps": 0.0
+  },
+  "held_out_float": {
+    "mean_fit": 2261.4,
+    "max_fit": 3066.0,
+    "min_fit": 2137.0,
+    "std_fit": 272.66030147419696,
+    "mean_floor": 1.1,
+    "max_floor": 2.0,
+    "mean_kills": 1.5,
+    "max_kills": 6.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 46.1,
+    "mean_explored": 1071.4,
+    "mean_turns": 128.5,
+    "mean_wall_bumps": 0.0
+  },
+  "held_out_int8": {
+    "mean_fit": 2261.4,
+    "max_fit": 3066.0,
+    "min_fit": 2137.0,
+    "std_fit": 272.66030147419696,
+    "mean_floor": 1.1,
+    "max_floor": 2.0,
+    "mean_kills": 1.5,
+    "max_kills": 6.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 46.1,
+    "mean_explored": 1071.4,
+    "mean_turns": 128.3,
+    "mean_wall_bumps": 0.0
+  },
+  "quantization_retention": 1.0,
+  "wall_clock_s": 106.099
+}

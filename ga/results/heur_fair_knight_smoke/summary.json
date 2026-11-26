@@ -1,0 +1,82 @@
+{
+  "config": {
+    "run_id": "heuristic_fair_knight_smoke_s1017",
+    "model": "heuristic",
+    "obs": "fair",
+    "cls": "knight",
+    "tier": "smoke",
+    "pop": 24,
+    "gens": 25,
+    "seeds": 4,
+    "train_seeds": [
+      17823,
+      34235,
+      28779,
+      46298
+    ],
+    "held_out_seeds": [
+      4951,
+      9320,
+      13689,
+      18058,
+      22427,
+      26796,
+      31165,
+      35534,
+      39903,
+      44257
+    ],
+    "workers": 10,
+    "seed": 1017,
+    "max_turns": 350,
+    "stall_turns": 140,
+    "out_dir": "C:\\Users\\joaog\\workspace_v12\\mspgame\\ga\\results\\heur_fair_knight_smoke"
+  },
+  "train_stats": {
+    "mean_fit": 3768.75,
+    "max_fit": 6060.0,
+    "min_fit": 1939.0,
+    "std_fit": 1481.5173598375418,
+    "mean_floor": 3.25,
+    "max_floor": 5.0,
+    "mean_kills": 11.5,
+    "max_kills": 17.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 147.25,
+    "mean_explored": 1162.0,
+    "mean_turns": 262.75,
+    "mean_wall_bumps": 0.0
+  },
+  "held_out_float": {
+    "mean_fit": 2233.3,
+    "max_fit": 4176.0,
+    "min_fit": 517.0,
+    "std_fit": 1180.2147304622156,
+    "mean_floor": 2.3,
+    "max_floor": 4.0,
+    "mean_kills": 8.0,
+    "max_kills": 19.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 91.3,
+    "mean_explored": 686.0,
+    "mean_turns": 212.1,
+    "mean_wall_bumps": 0.0
+  },
+  "held_out_int8": {
+    "mean_fit": 2233.3,
+    "max_fit": 4176.0,
+    "min_fit": 517.0,
+    "std_fit": 1180.2147304622156,
+    "mean_floor": 2.3,
+    "max_floor": 4.0,
+    "mean_kills": 8.0,
+    "max_kills": 19.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 91.3,
+    "mean_explored": 686.0,
+    "mean_turns": 212.1,
+    "mean_wall_bumps": 0.0
+  },
+  "quantization_retention": 1.0,
+  "wall_clock_s": 38.326
+}

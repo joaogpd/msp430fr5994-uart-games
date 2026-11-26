@@ -1,0 +1,83 @@
+{
+  "config": {
+    "run_id": "mlp_fair_knight_medium_s1068",
+    "model": "mlp",
+    "obs": "fair",
+    "cls": "knight",
+    "tier": "medium",
+    "pop": 36,
+    "gens": 50,
+    "seeds": 5,
+    "train_seeds": [
+      18785,
+      7567,
+      52111,
+      1824,
+      21052
+    ],
+    "held_out_seeds": [
+      4951,
+      9320,
+      13689,
+      18058,
+      22427,
+      26796,
+      31165,
+      35534,
+      39903,
+      44257
+    ],
+    "workers": 10,
+    "seed": 1068,
+    "max_turns": 350,
+    "stall_turns": 140,
+    "out_dir": "C:\\Users\\joaog\\workspace_v12\\mspgame\\ga\\results\\mlp_fair_knight_medium"
+  },
+  "train_stats": {
+    "mean_fit": 2194.2,
+    "max_fit": 4152.0,
+    "min_fit": 138.0,
+    "std_fit": 1505.7127747349425,
+    "mean_floor": 1.6,
+    "max_floor": 3.0,
+    "mean_kills": 5.0,
+    "max_kills": 11.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 58.0,
+    "mean_explored": 874.6,
+    "mean_turns": 140.6,
+    "mean_wall_bumps": 0.0
+  },
+  "held_out_float": {
+    "mean_fit": 366.7,
+    "max_fit": 720.0,
+    "min_fit": 142.0,
+    "std_fit": 190.47679648713122,
+    "mean_floor": 1.0,
+    "max_floor": 1.0,
+    "mean_kills": 1.1,
+    "max_kills": 3.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 9.2,
+    "mean_explored": 170.5,
+    "mean_turns": 140.0,
+    "mean_wall_bumps": 0.0
+  },
+  "held_out_int8": {
+    "mean_fit": 366.7,
+    "max_fit": 720.0,
+    "min_fit": 142.0,
+    "std_fit": 190.47679648713122,
+    "mean_floor": 1.0,
+    "max_floor": 1.0,
+    "mean_kills": 1.1,
+    "max_kills": 3.0,
+    "total_boss_kills": 0.0,
+    "mean_gold": 9.2,
+    "mean_explored": 170.5,
+    "mean_turns": 140.0,
+    "mean_wall_bumps": 0.0
+  },
+  "quantization_retention": 1.0,
+  "wall_clock_s": 90.072
+}
