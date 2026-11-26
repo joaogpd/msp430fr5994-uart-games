@@ -187,7 +187,8 @@ static bool          s_low_hp_pulse = false;
 static bool          s_was_low_hp = false;
 static uint8_t       s_low_hp_beep_ticks = 0u;
 static uint16_t      s_rng = 0x5D17u;
-static char     s_status_msg[STATUS_LEN + 1u];
+static char          s_status_msg[STATUS_LEN + 1u];
+static uint8_t       s_status_ttl = 0u;
 
 static dng_btn_t        s_btn;
 static volatile uint8_t s_cmd_q[CMD_QUEUE_SIZE];
@@ -321,6 +322,17 @@ static void record_hall_of_fame(void)
     }
 }
 
+static void clear_status(void)
+{
+    uint8_t i;
+    for (i = 0u; i < STATUS_LEN; i++)
+    {
+        s_status_msg[i] = ' ';
+    }
+    s_status_msg[STATUS_LEN] = '\0';
+    s_status_ttl = 0u;
+}
+
 static void set_status(const char *msg)
 {
     uint8_t i = 0u;
@@ -334,6 +346,7 @@ static void set_status(const char *msg)
         s_status_msg[i++] = ' ';
     }
     s_status_msg[STATUS_LEN] = '\0';
+    s_status_ttl = (msg[0] != '\0') ? 2u : 0u;
 }
 
 static uint8_t append_u8_to_status(uint8_t p, uint8_t val)
@@ -358,6 +371,7 @@ static void set_status_combat(const char *prefix, const char *name, uint8_t val1
     for (s = suffix; *s && p < STATUS_LEN; s++) { s_status_msg[p++] = *s; }
     while (p < STATUS_LEN) { s_status_msg[p++] = ' '; }
     s_status_msg[STATUS_LEN] = '\0';
+    s_status_ttl = 2u;
 }
 
 static int8_t find_enemy_at(uint8_t x, uint8_t y)
@@ -2160,6 +2174,18 @@ static void step_in_direction(uint8_t dir)
         s_full_redraw = true;
         s_dirty = true;
         return;
+    }
+    else
+    {
+        /* Fade old status message after 2 quiet walking steps */
+        if (s_status_ttl > 0u)
+        {
+            s_status_ttl--;
+            if (s_status_ttl == 0u)
+            {
+                clear_status();
+            }
+        }
     }
 
     monster_turn();
