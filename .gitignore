@@ -1,0 +1,29 @@
+# TI Code Composer Studio (CCS) build outputs and workspace metadata
+Debug/
+Release/
+.metadata/
+.launches/
+
+# Compiled & intermediate embedded artifacts
+*.obj
+*.out
+*.map
+*.lst
+*.hex
+*.bin
+*.elf
+*.d
+*.pp
+*.i
+*.rl
+*.nfo
+*.aux
+
+# Editor & OS files
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
