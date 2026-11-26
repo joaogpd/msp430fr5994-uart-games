@@ -18,11 +18,12 @@
 #define STATUS_LEN          79u
 
 /* Enemy flags */
-#define EF_AIMING           0x01u   /* Archer telegraphed shot ready to fire next turn */
+#define EF_AIMING           0x01u   /* Archer/Boss telegraphed shot/wave ready next turn */
 #define EF_AWAKE            0x02u   /* Mimic revealed and hostile */
 #define EF_SLOW_SKIP        0x04u   /* Slime moves every 2nd turn */
 #define EF_FREEZE_SHIFT     3u      /* Bits 3..4 store 0..3 frozen turns */
 #define EF_FREEZE_MASK      0x18u
+#define EF_BOSS_SUMMONED    0x20u   /* Bone Warden already summoned 50% HP minion */
 
 typedef enum
 {
@@ -67,14 +68,27 @@ typedef struct
     uint8_t     gold_bolt;
 } dng_enemy_def_t;
 
-static const dng_enemy_def_t k_enemy_defs[6] = {
-    { "None",     "  ", "\x1b[0m",    0u, 0u,  0u,  0u },
-    { "Slime",    "sl", "\x1b[1;31m", 3u, 1u,  6u,  8u },
-    { "Skeleton", "SK", "\x1b[1;35m", 5u, 2u, 12u, 15u },
-    { "Archer",   "AR", "\x1b[1;33m", 4u, 2u, 14u, 16u },
-    { "Wraith",   "WR", "\x1b[1;36m", 3u, 1u, 16u, 18u },
-    { "Mimic",    "MM", "\x1b[1;31m", 6u, 3u, 30u, 30u }
+static const dng_enemy_def_t k_enemy_defs[7] = {
+    { "None",     "  ", "\x1b[0m",    0u, 0u,   0u,   0u },
+    { "Slime",    "sl", "\x1b[1;31m", 3u, 1u,   6u,   8u },
+    { "Skeleton", "SK", "\x1b[1;35m", 5u, 2u,  12u,  15u },
+    { "Archer",   "AR", "\x1b[1;33m", 4u, 2u,  14u,  16u },
+    { "Wraith",   "WR", "\x1b[1;36m", 3u, 1u,  16u,  18u },
+    { "Mimic",    "MM", "\x1b[1;31m", 6u, 3u,  30u,  30u },
+    { "Warden",   "BW", "\x1b[1;35m", 24u, 3u, 100u, 100u }
 };
+
+static const char *const k_class_short[3] = { "KNT", "ARC", "ROG" };
+
+typedef struct
+{
+    uint16_t gold;
+    uint16_t seed;
+    uint8_t  floor;
+    uint8_t  cls;
+    uint8_t  valid;
+    uint8_t  pad;
+} dng_hof_entry_t;
 
 /*
  * Persisted dungeon run stored in FRAM via ckpt.
@@ -85,6 +99,7 @@ typedef struct
     uint16_t    best_floor;
     uint16_t    gold;
     uint16_t    rng_state;
+    uint16_t    run_seed;
     uint8_t     floor;
     uint8_t     hp;
     uint8_t     max_hp;
@@ -95,6 +110,8 @@ typedef struct
     uint8_t     px;
     uint8_t     py;
     uint8_t         dir;            /* 0=N, 1=E, 2=S, 3=W */
+    uint8_t         cls;
+    uint8_t         relics;
     uint8_t         empowered;
     uint8_t         has_saved_run;
     uint8_t         potions;
@@ -130,7 +147,9 @@ static uint8_t     s_prev_vis[DNG_VIEW_H][DNG_VIEW_W] = { { 0 } };
 #pragma PERSISTENT(s_enemies)
 static dng_enemy_t s_enemies[DNG_MAX_ENEMIES] = { { 0 } };
 #pragma PERSISTENT(s_ckpt_stage)
-static dng_ckpt_t  s_ckpt_stage = { 0 };
+static dng_ckpt_t      s_ckpt_stage = { 0 };
+#pragma PERSISTENT(s_hof)
+static dng_hof_entry_t s_hof[DNG_HOF_ENTRIES] = { { 0 } };
 
 /* Small active state in SRAM */
 static uint8_t  s_px;
@@ -154,6 +173,11 @@ static bool          s_dirty;
 static bool          s_full_redraw;
 static bool          s_map_mode;
 static bool          s_help_mode;
+static bool          s_hof_mode;
+static bool          s_class_select;
+static uint8_t       s_class;
+static uint8_t       s_relics;
+static uint16_t      s_run_seed;
 static uint8_t       s_potions;
 static uint8_t       s_bombs;
 static uint8_t       s_scrolls;
@@ -261,10 +285,40 @@ static const char *shop_kind_name(uint8_t kind)
     }
 }
 
+static bool is_boss_floor(uint8_t fl)
+{
+    return (fl > 0u && (fl % 5u) == 0u);
+}
+
 static bool is_cave_floor(uint8_t fl)
 {
-    /* Floors 3-4, 7-8, ... are Fungal Caverns; 1-2, 5-6, ... are Stone Crypt */
+    if (is_boss_floor(fl)) { return false; }
+    /* Floors 3-4, 7-8, ... are Fungal Caverns; 1-2, 6, ... are Stone Crypt */
     return (((fl - 1u) & 0x02u) != 0u);
+}
+
+static void record_hall_of_fame(void)
+{
+    uint8_t i, j;
+    for (i = 0u; i < DNG_HOF_ENTRIES; i++)
+    {
+        bool better = (!s_hof[i].valid) ||
+                      (s_floor > s_hof[i].floor) ||
+                      (s_floor == s_hof[i].floor && s_gold > s_hof[i].gold);
+        if (better)
+        {
+            for (j = (uint8_t)(DNG_HOF_ENTRIES - 1u); j > i; j--)
+            {
+                s_hof[j] = s_hof[j - 1u];
+            }
+            s_hof[i].floor = s_floor;
+            s_hof[i].gold  = s_gold;
+            s_hof[i].seed  = s_run_seed;
+            s_hof[i].cls   = s_class;
+            s_hof[i].valid = 1u;
+            break;
+        }
+    }
 }
 
 static void set_status(const char *msg)
@@ -345,11 +399,12 @@ static void cast_los_ray(int8_t x1, int8_t y1)
         s_map[uy][ux] |= (uint8_t)(TILE_F_VISIBLE | TILE_F_EXPLORED);
 
         uint8_t t = tile_type(ux, uy);
-        /* Reveal hidden traps when close enough */
+        /* Reveal hidden traps when close enough (Rogue spots from distance 4!) */
         if (t == DNG_TRAP)
         {
             uint8_t dist = (uint8_t)(u8_abs_diff(ux, s_px) + u8_abs_diff(uy, s_py));
-            if (dist <= 2u)
+            uint8_t spot_r = (s_class == CLASS_ROGUE) ? 4u : 2u;
+            if (dist <= spot_r)
             {
                 s_map[uy][ux] |= TILE_F_REVEALED;
             }
@@ -394,13 +449,14 @@ static void compute_los(void)
 
     s_map[s_py][s_px] |= (uint8_t)(TILE_F_VISIBLE | TILE_F_EXPLORED);
 
-    /* Cast rays to all 48 perimeter points of the +/-LOS_RADIUS box */
-    for (d = -LOS_RADIUS; d <= LOS_RADIUS; d++)
+    /* Cast rays to perimeter points of +/-rad box (Rogue gets +1 vision!) */
+    int8_t rad = (s_class == CLASS_ROGUE) ? (int8_t)(LOS_RADIUS + 1) : (int8_t)LOS_RADIUS;
+    for (d = (int8_t)-rad; d <= rad; d++)
     {
-        cast_los_ray((int8_t)((int8_t)s_px + d), (int8_t)((int8_t)s_py - LOS_RADIUS));
-        cast_los_ray((int8_t)((int8_t)s_px + d), (int8_t)((int8_t)s_py + LOS_RADIUS));
-        cast_los_ray((int8_t)((int8_t)s_px - LOS_RADIUS), (int8_t)((int8_t)s_py + d));
-        cast_los_ray((int8_t)((int8_t)s_px + LOS_RADIUS), (int8_t)((int8_t)s_py + d));
+        cast_los_ray((int8_t)((int8_t)s_px + d), (int8_t)((int8_t)s_py - rad));
+        cast_los_ray((int8_t)((int8_t)s_px + d), (int8_t)((int8_t)s_py + rad));
+        cast_los_ray((int8_t)((int8_t)s_px - rad), (int8_t)((int8_t)s_py + d));
+        cast_los_ray((int8_t)((int8_t)s_px + rad), (int8_t)((int8_t)s_py + d));
     }
 }
 
@@ -455,6 +511,7 @@ static bool commit_checkpoint(bool save_active_run)
     s_ckpt_stage.best_floor    = s_best_floor;
     s_ckpt_stage.gold          = s_gold;
     s_ckpt_stage.rng_state     = s_rng;
+    s_ckpt_stage.run_seed      = s_run_seed;
     s_ckpt_stage.floor         = s_floor;
     s_ckpt_stage.hp            = s_hp;
     s_ckpt_stage.max_hp        = s_max_hp;
@@ -465,6 +522,8 @@ static bool commit_checkpoint(bool save_active_run)
     s_ckpt_stage.px            = s_px;
     s_ckpt_stage.py            = s_py;
     s_ckpt_stage.dir           = s_dir;
+    s_ckpt_stage.cls           = s_class;
+    s_ckpt_stage.relics        = s_relics;
     s_ckpt_stage.empowered     = s_empowered ? 1u : 0u;
     s_ckpt_stage.has_saved_run = s_has_saved_run ? 1u : 0u;
     s_ckpt_stage.potions       = s_potions;
@@ -496,6 +555,7 @@ static bool load_checkpoint(bool restore_full_run)
     {
         s_gold      = s_ckpt_stage.gold;
         s_rng       = (s_ckpt_stage.rng_state != 0u) ? s_ckpt_stage.rng_state : 0x5D17u;
+        s_run_seed  = s_ckpt_stage.run_seed;
         s_floor     = s_ckpt_stage.floor;
         s_hp        = s_ckpt_stage.hp;
         s_max_hp    = s_ckpt_stage.max_hp;
@@ -506,6 +566,8 @@ static bool load_checkpoint(bool restore_full_run)
         s_px        = (s_ckpt_stage.px < DNG_W) ? s_ckpt_stage.px : 2u;
         s_py        = (s_ckpt_stage.py < DNG_H) ? s_ckpt_stage.py : 2u;
         s_dir       = s_ckpt_stage.dir & 0x03u;
+        s_class     = (s_ckpt_stage.cls < 3u) ? s_ckpt_stage.cls : CLASS_KNIGHT;
+        s_relics    = s_ckpt_stage.relics;
         s_empowered = (s_ckpt_stage.empowered != 0u);
         s_potions   = s_ckpt_stage.potions;
         s_bombs     = s_ckpt_stage.bombs;
@@ -514,6 +576,8 @@ static bool load_checkpoint(bool restore_full_run)
         s_game_over = false;
         s_map_mode  = false;
         s_help_mode = false;
+        s_hof_mode  = false;
+        s_class_select = false;
         s_was_low_hp = is_low_hp();
         s_low_hp_pulse = false;
         s_low_hp_beep_ticks = 0u;
@@ -666,16 +730,55 @@ static void place_secret_alcove(void)
 static void spawn_enemy(uint8_t slot, uint8_t x, uint8_t y, uint8_t type)
 {
     const dng_enemy_def_t *def = &k_enemy_defs[type];
-    uint8_t bonus_hp = (s_floor >= 4u) ? (uint8_t)((s_floor - 2u) / 2u) : 0u;
+    uint8_t bonus_hp;
+    if (type == ENEMY_BOSS)
+    {
+        bonus_hp = (s_floor > 5u) ? (uint8_t)(((s_floor - 5u) / 5u) * 6u) : 0u;
+    }
+    else
+    {
+        bonus_hp = (s_floor >= 4u) ? (uint8_t)((s_floor - 2u) / 2u) : 0u;
+    }
+
+    uint16_t hp_sum = (uint16_t)def->base_hp + (uint16_t)bonus_hp;
+    if (hp_sum > 250u) { hp_sum = 250u; }
 
     s_enemies[slot].x      = x;
     s_enemies[slot].y      = y;
     s_enemies[slot].type   = type;
-    s_enemies[slot].hp     = (uint8_t)(def->base_hp + bonus_hp);
+    s_enemies[slot].hp     = (uint8_t)hp_sum;
     s_enemies[slot].max_hp = s_enemies[slot].hp;
     s_enemies[slot].flags  = (type == ENEMY_MIMIC) ? 0u : EF_AWAKE;
     s_enemies[slot].aim_dx = 0;
     s_enemies[slot].aim_dy = 0;
+}
+
+static void generate_boss_sanctum(void)
+{
+    /* Symmetrical Boss Sanctum: West antechamber + East pillared arena */
+    carve_room(4u, 7u, 8u, 8u);     /* Antechamber */
+    carve_room(18u, 3u, 24u, 16u);  /* Main Boss Arena */
+    carve_corridor(11u, 11u, 18u, 11u);
+    s_map[11u][14u] = DNG_DOOR_CLOSED;
+
+    /* 4 cover pillars inside arena */
+    s_map[6u][23u]  = DNG_WALL; s_map[6u][24u]  = DNG_WALL;
+    s_map[15u][23u] = DNG_WALL; s_map[15u][24u] = DNG_WALL;
+    s_map[6u][35u]  = DNG_WALL; s_map[6u][36u]  = DNG_WALL;
+    s_map[15u][35u] = DNG_WALL; s_map[15u][36u] = DNG_WALL;
+
+    /* Pre-boss supplies in antechamber */
+    s_map[8u][6u]  = DNG_POTION;
+    s_map[13u][6u] = DNG_MANA;
+
+    s_px = 7u;
+    s_py = 11u;
+
+    /* Spawn The Bone Warden at slot 0 in arena center-east */
+    spawn_enemy(0u, 32u, 11u, ENEMY_BOSS);
+
+    compute_los();
+    update_camera(true);
 }
 
 static void place_shop(void)
@@ -727,6 +830,12 @@ static void generate_floor(void)
     memset(s_enemies, 0, sizeof(s_enemies));
     memset(s_shop, 0, sizeof(s_shop));
     s_shop_preview = 255u;
+
+    if (is_boss_floor(s_floor))
+    {
+        generate_boss_sanctum();
+        return;
+    }
 
     if (is_cave_floor(s_floor))
     {
@@ -907,35 +1016,65 @@ static void generate_floor(void)
     update_camera(true);
 }
 
-static void start_new_run(void)
+static void start_new_run_with_class(uint8_t cls)
 {
+    s_class     = (cls < 3u) ? cls : CLASS_KNIGHT;
+    /* Mix free-running ACLK Timer_A1 counter for real per-run seed variety */
+    s_rng      ^= (uint16_t)TA1R;
+    s_run_seed  = next_rand();
+    if (s_run_seed == 0u) { s_run_seed = 0x5D17u; }
+    s_rng       = s_run_seed;
+
     s_floor     = 1u;
-    s_gold      = 0u;
-    s_max_hp    = 14u;
-    s_hp        = 14u;
-    s_max_mana  = 5u;
-    s_mana      = 5u;
-    s_atk       = 2u;
-    s_def       = 0u;
+    s_gold      = (s_class == CLASS_ROGUE) ? 25u : 0u;
+    s_relics    = 0u;
     s_dir       = 1u;
-    s_potions   = 1u;
-    s_bombs     = 1u;
-    s_scrolls   = 0u;
     s_shop_preview = 255u;
     s_empowered = false;
     s_game_over = false;
     s_map_mode  = false;
     s_help_mode = false;
+    s_hof_mode  = false;
+    s_class_select = false;
     s_was_low_hp = false;
     s_low_hp_pulse = false;
     s_low_hp_beep_ticks = 0u;
 
+    if (s_class == CLASS_KNIGHT)
+    {
+        s_max_hp = 16u; s_hp = 16u; s_max_mana = 4u; s_mana = 4u;
+        s_atk = 3u; s_def = 1u; s_potions = 1u; s_bombs = 0u; s_scrolls = 0u;
+    }
+    else if (s_class == CLASS_ARCANIST)
+    {
+        s_max_hp = 11u; s_hp = 11u; s_max_mana = 8u; s_mana = 8u;
+        s_atk = 2u; s_def = 0u; s_potions = 1u; s_bombs = 1u; s_scrolls = 0u;
+    }
+    else
+    {
+        s_max_hp = 12u; s_hp = 12u; s_max_mana = 5u; s_mana = 5u;
+        s_atk = 2u; s_def = 0u; s_potions = 1u; s_bombs = 1u; s_scrolls = 1u;
+    }
+
     board_led1(false);
     board_led2(false);
     generate_floor();
-    set_status("WELCOME! PRESS ? FOR HELP, M FOR FULL MAP, 1-3 FOR BELT ITEMS.");
+    set_status("ADVENTURE BEGINS! PRESS ? FOR HELP, M FOR MAP, H FOR HALL OF FAME.");
     s_full_redraw = true;
     s_dirty = true;
+}
+
+static void start_new_run(void)
+{
+    s_class_select = true;
+    s_game_over    = false;
+    s_map_mode     = false;
+    s_help_mode    = false;
+    s_hof_mode     = false;
+    board_led1(false);
+    board_led2(false);
+    s_full_redraw  = true;
+    s_dirty        = true;
 }
 
 void dungeon_game_init(void)
@@ -951,6 +1090,8 @@ void dungeon_game_init(void)
     s_full_redraw        = true;
     s_map_mode           = false;
     s_help_mode          = false;
+    s_hof_mode           = false;
+    s_class_select       = false;
     s_was_low_hp         = false;
     s_low_hp_pulse       = false;
     s_low_hp_beep_ticks  = 0u;
@@ -967,7 +1108,12 @@ void dungeon_game_init(void)
         (void)timer_start_oneshot_ms(TIMER_A0, DEBOUNCE_PERIOD_MS, dungeon_game_on_debounce_timer);
     }
 
-    if (force_new_run || !load_checkpoint(true))
+    if (force_new_run)
+    {
+        (void)load_checkpoint(false); /* Preserve best_floor & has_saved_run metadata */
+        start_new_run();
+    }
+    else if (!load_checkpoint(true))
     {
         start_new_run();
     }
@@ -1137,12 +1283,13 @@ static void damage_player(uint8_t raw_dmg, const char *source_name)
         s_was_low_hp = false;
         s_low_hp_pulse = false;
         board_led1(true);
+        record_hall_of_fame();
         /* Never overwrite an active FRAM save with dead (0 HP) state */
         if (!s_has_saved_run)
         {
             (void)commit_checkpoint(false);
         }
-        set_status("YOU DIED! PRESS W/SPACE FOR NEW RUN, OR R TO LOAD FRAM SAVE.");
+        set_status("YOU DIED! W/SPACE:NEW RUN  R:LOAD FRAM  H:HALL OF FAME");
         s_full_redraw = true;
     }
 }
@@ -1178,10 +1325,38 @@ static void damage_enemy(uint8_t idx, uint8_t dmg, bool by_bolt)
     }
     else
     {
+        uint8_t killed_type = e->type;
         uint8_t loot = by_bolt ? def->gold_bolt : def->gold_melee;
         s_gold = (uint16_t)(s_gold + loot);
-        set_status_combat(by_bolt ? "ZAP! SLAIN " : "DEFEATED ", def->name, loot, " GOLD!", 255u, "");
         e->type = ENEMY_NONE;
+
+        /* Vampiric Fang relic heals +1 HP per kill */
+        if ((s_relics & RELIC_VAMP) != 0u && s_hp < s_max_hp)
+        {
+            s_hp++;
+            if (!is_low_hp() && s_was_low_hp)
+            {
+                s_was_low_hp = false;
+                s_low_hp_pulse = false;
+                board_led1(false);
+                s_full_redraw = true;
+            }
+        }
+
+        if (killed_type == ENEMY_BOSS)
+        {
+            /* Open Endless Deep stairs and drop 2 Relic choice pedestals */
+            s_map[11u][38u] = (uint8_t)(DNG_STAIRS | TILE_F_EXPLORED);
+            s_map[9u][30u]  = (uint8_t)(DNG_RELIC  | TILE_F_EXPLORED);              /* *V Vampiric Fang */
+            s_map[13u][30u] = (uint8_t)(DNG_RELIC  | TILE_F_ALT | TILE_F_EXPLORED); /* *A Arcane Ring */
+            compute_los();
+            set_status("VICTORY! WARDEN SLAIN (+100G)! PICK *V(VAMP) OR *A(ARC) & DESCEND!");
+            s_full_redraw = true;
+        }
+        else
+        {
+            set_status_combat(by_bolt ? "ZAP! SLAIN " : "DEFEATED ", def->name, loot, " GOLD!", 255u, "");
+        }
     }
 }
 
@@ -1212,6 +1387,65 @@ static void monster_turn(void)
         uint8_t dx = u8_abs_diff(e->x, s_px);
         uint8_t dy = u8_abs_diff(e->y, s_py);
         uint8_t dist = (uint8_t)(dx + dy);
+
+        /* Bone Warden Boss 2-turn telegraphed Bone Wave & 50% HP Skeleton summon */
+        if (e->type == ENEMY_BOSS)
+        {
+            if ((e->flags & EF_AIMING) != 0u)
+            {
+                e->flags &= (uint8_t)~EF_AIMING;
+                if ((s_px == e->x || s_py == e->y) && dist <= 6u &&
+                    clear_straight_line(e->x, e->y, s_px, s_py))
+                {
+                    damage_player(3u, "BONE WAVE SMASHES YOU FOR");
+                }
+                else
+                {
+                    set_status("YOU DODGED THE BONE WARDEN'S WAVE!");
+                }
+                continue;
+            }
+
+            if (e->hp <= (uint8_t)(e->max_hp / 2u) && (e->flags & EF_BOSS_SUMMONED) == 0u)
+            {
+                uint8_t slot, d;
+                e->flags |= EF_BOSS_SUMMONED;
+                for (slot = 1u; slot < DNG_MAX_ENEMIES; slot++)
+                {
+                    if (s_enemies[slot].type == ENEMY_NONE)
+                    {
+                        for (d = 0u; d < 4u; d++)
+                        {
+                            int8_t ix = (int8_t)((int8_t)e->x + DIR_DX[d]);
+                            int8_t iy = (int8_t)((int8_t)e->y + DIR_DY[d]);
+                            if (ix <= 0 || ix >= (int8_t)(DNG_W - 1u) || iy <= 0 || iy >= (int8_t)(DNG_H - 1u))
+                            {
+                                continue;
+                            }
+                            uint8_t sx = (uint8_t)ix;
+                            uint8_t sy = (uint8_t)iy;
+                            if (!tile_blocks_move(tile_type(sx, sy)) &&
+                                find_enemy_at(sx, sy) < 0 && !(sx == s_px && sy == s_py))
+                            {
+                                spawn_enemy(slot, sx, sy, ENEMY_SKELETON);
+                                set_status("BONE WARDEN SUMMONS A SKELETON GUARD!");
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            if (dist >= 2u && dist <= 6u && (s_map[e->y][e->x] & TILE_F_VISIBLE) != 0u &&
+                (next_rand() & 1u) == 0u)
+            {
+                e->flags |= EF_AIMING;
+                set_status("WARNING: BONE WARDEN CHARGES BONE WAVE (!!) - LEAVE ITS ROW/COL!");
+                continue;
+            }
+        }
 
         /* Cultist Archer firing a previously telegraphed shot */
         if (e->type == ENEMY_ARCHER && (e->flags & EF_AIMING) != 0u)
@@ -1362,6 +1596,8 @@ static void cast_arcane_bolt(void)
     int8_t x = (int8_t)s_px;
     int8_t y = (int8_t)s_py;
     uint8_t step;
+    uint8_t hits = 0u;
+    uint8_t max_hits = (s_class == CLASS_ARCANIST) ? 2u : 1u;
     bool hit_anything = false;
 
     for (step = 0u; step < 8u; step++)
@@ -1378,7 +1614,9 @@ static void cast_arcane_bolt(void)
         {
             damage_enemy((uint8_t)ei, bolt_dmg, true);
             hit_anything = true;
-            break;
+            hits++;
+            if (hits >= max_hits) { break; }
+            continue;
         }
 
         uint8_t t = tile_type((uint8_t)x, (uint8_t)y);
@@ -1420,6 +1658,7 @@ static void cast_frost_nova(void)
     uint8_t dmg = (uint8_t)(s_atk + (s_empowered ? 1u : 0u));
     s_empowered = false;
 
+    bool boss_was_alive = (s_enemies[0].type == ENEMY_BOSS);
     uint8_t i, hits = 0u;
     for (i = 0u; i < DNG_MAX_ENEMIES; i++)
     {
@@ -1434,13 +1673,16 @@ static void cast_frost_nova(void)
         }
     }
 
-    if (hits > 0u)
+    if (!(boss_was_alive && s_enemies[0].type != ENEMY_BOSS))
     {
-        set_status_combat("FROST NOVA FROZE", "", hits, " FOE(S) FOR 2 TURNS!", 255u, "");
-    }
-    else
-    {
-        set_status("FROST NOVA CHILLED THE AIR (NO ADJACENT FOES).");
+        if (hits > 0u)
+        {
+            set_status_combat("FROST NOVA FROZE", "", hits, " FOE(S) FOR 2 TURNS!", 255u, "");
+        }
+        else
+        {
+            set_status("FROST NOVA CHILLED THE AIR (NO ADJACENT FOES).");
+        }
     }
 
     monster_turn();
@@ -1561,6 +1803,7 @@ static void use_bomb(void)
         }
     }
 
+    bool boss_was_alive = (s_enemies[0].type == ENEMY_BOSS);
     for (i = 0u; i < DNG_MAX_ENEMIES; i++)
     {
         dng_enemy_t *e = &s_enemies[i];
@@ -1573,13 +1816,16 @@ static void use_bomb(void)
     }
 
     compute_los();
-    if (hits > 0u)
+    if (!(boss_was_alive && s_enemies[0].type != ENEMY_BOSS))
     {
-        set_status_combat("BOOM! BOMB BLASTED", "", hits, " FOE(S) & NEARBY STONE!", 255u, "");
-    }
-    else
-    {
-        set_status("BOOM! BOMB SHATTERED NEARBY STONE WALLS!");
+        if (hits > 0u)
+        {
+            set_status_combat("BOOM! BOMB BLASTED", "", hits, " FOE(S) & NEARBY STONE!", 255u, "");
+        }
+        else
+        {
+            set_status("BOOM! BOMB SHATTERED NEARBY STONE WALLS!");
+        }
     }
     monster_turn();
     s_dirty = true;
@@ -1727,6 +1973,11 @@ static void step_in_direction(uint8_t dir)
     if (ei >= 0)
     {
         uint8_t dmg = s_empowered ? (uint8_t)(s_atk + ((s_atk + 1u) / 2u)) : s_atk;
+        /* Rogue passive: +2 Crit dmg on first strike against a full-HP foe */
+        if (s_class == CLASS_ROGUE && s_enemies[ei].hp == s_enemies[ei].max_hp)
+        {
+            dmg = (uint8_t)(dmg + 2u);
+        }
         s_empowered = false;
         if (s_enemies[ei].type == ENEMY_MIMIC && (s_enemies[ei].flags & EF_AWAKE) == 0u)
         {
@@ -1855,6 +2106,35 @@ static void step_in_direction(uint8_t dir)
             set_status("TREASURE CHEST! +25G & +1 MAX HP!");
         }
     }
+    else if (target == DNG_RELIC)
+    {
+        bool is_arcane = ((s_map[ny][nx] & TILE_F_ALT) != 0u);
+        uint8_t rr, cc;
+        /* Claim chosen relic and dissolve any other relic pedestal on the floor */
+        for (rr = 0u; rr < DNG_H; rr++)
+        {
+            for (cc = 0u; cc < DNG_W; cc++)
+            {
+                if (tile_type(cc, rr) == DNG_RELIC)
+                {
+                    set_tile_type(cc, rr, DNG_FLOOR);
+                }
+            }
+        }
+        if (is_arcane)
+        {
+            s_relics |= RELIC_ARCANE;
+            s_max_mana = (uint8_t)(s_max_mana + 2u);
+            s_mana = s_max_mana;
+            set_status("RELIC CLAIMED: ARCANE RING (+2 MAX MP & +1 MP PER FLOOR)!");
+        }
+        else
+        {
+            s_relics |= RELIC_VAMP;
+            set_status("RELIC CLAIMED: VAMPIRIC FANG (+1 HP ON EVERY KILL)!");
+        }
+        s_full_redraw = true;
+    }
     else if (target == DNG_STAIRS)
     {
         s_floor++;
@@ -1862,10 +2142,21 @@ static void step_in_direction(uint8_t dir)
         {
             s_best_floor = (uint16_t)s_floor;
         }
+        if ((s_relics & RELIC_ARCANE) != 0u && s_mana < s_max_mana)
+        {
+            s_mana++;
+        }
         generate_floor();
         (void)commit_checkpoint(true);
-        set_status(is_cave_floor(s_floor) ? "DESCENDED INTO FUNGAL CAVERNS! SAVED TO FRAM."
-                                          : "DESCENDED INTO STONE CRYPT! SAVED TO FRAM.");
+        if (is_boss_floor(s_floor))
+        {
+            set_status("ENTERED THE BOSS SANCTUM! PREPARE TO FACE THE BONE WARDEN!");
+        }
+        else
+        {
+            set_status(is_cave_floor(s_floor) ? "DESCENDED INTO FUNGAL CAVERNS! SAVED TO FRAM."
+                                              : "DESCENDED INTO STONE CRYPT! SAVED TO FRAM.");
+        }
         s_full_redraw = true;
         s_dirty = true;
         return;
@@ -1915,6 +2206,19 @@ static uint16_t buf_put_u16_pad4(char *dst, uint16_t pos, uint16_t cap, uint16_t
         dst[pos++] = (char)('0' + ((val / 100u)  % 10u));
         dst[pos++] = (char)('0' + ((val / 10u)   % 10u));
         dst[pos++] = (char)('0' + (val % 10u));
+    }
+    return pos;
+}
+
+static uint16_t buf_put_hex16(char *dst, uint16_t pos, uint16_t cap, uint16_t val)
+{
+    static const char k_hex[16] = "0123456789ABCDEF";
+    if ((uint16_t)(pos + 4u) <= cap)
+    {
+        dst[pos++] = k_hex[(val >> 12) & 0x0Fu];
+        dst[pos++] = k_hex[(val >> 8)  & 0x0Fu];
+        dst[pos++] = k_hex[(val >> 4)  & 0x0Fu];
+        dst[pos++] = k_hex[val & 0x0Fu];
     }
     return pos;
 }
@@ -1970,11 +2274,29 @@ static uint8_t compute_cell_vis(uint8_t mx, uint8_t my)
             {
                 return 25u; /* Frozen enemy (FR cyan) */
             }
+            if (e->type == ENEMY_BOSS)
+            {
+                return ((e->flags & EF_AIMING) != 0u) ? 26u : 27u; /* B! or BW */
+            }
             if (e->type == ENEMY_ARCHER && (e->flags & EF_AIMING) != 0u)
             {
                 return 22u; /* Telegraphed Archer (A!) */
             }
             return (uint8_t)(16u + e->type); /* 17=Slime..21=Mimic */
+        }
+
+        /* Show Bone Warden's telegraphed Bone Wave danger cross (!!) */
+        if (s_enemies[0].type == ENEMY_BOSS && (s_enemies[0].flags & EF_AIMING) != 0u)
+        {
+            uint8_t bx = s_enemies[0].x;
+            uint8_t by = s_enemies[0].y;
+            uint8_t bd = (uint8_t)(u8_abs_diff(mx, bx) + u8_abs_diff(my, by));
+            if ((mx == bx || my == by) && bd > 0u && bd <= 6u &&
+                !tile_blocks_los((uint8_t)(cell & TILE_TYPE_MASK)) &&
+                clear_straight_line(bx, by, mx, my))
+            {
+                return 28u; /* Telegraphed danger tile !! */
+            }
         }
     }
 
@@ -1994,6 +2316,7 @@ static uint8_t compute_cell_vis(uint8_t mx, uint8_t my)
         case DNG_MANA:         return 23u;
         case DNG_CHEST:        return 14u;
         case DNG_SHOP:         return 24u;
+        case DNG_RELIC:        return ((cell & TILE_F_ALT) != 0u) ? 30u : 29u;
         default:               return vis ? 15u : 16u;
     }
 }
@@ -2027,6 +2350,11 @@ static void vis_style(uint8_t vis, uint8_t *color_id, const char **ansi_seq, con
         case 23u: *color_id = 10u; *ansi_seq = "\x1b[1;34m"; *glyph = " *"; break; /* Mana crystal */
         case 24u: *color_id = 1u;  *ansi_seq = "\x1b[1;32m"; *glyph = "$$"; break; /* Shop pedestal */
         case 25u: *color_id = 11u; *ansi_seq = "\x1b[1;37;46m"; *glyph = "FR"; break; /* Frozen enemy */
+        case 26u: *color_id = 9u;  *ansi_seq = "\x1b[1;37;41m"; *glyph = "B!"; break; /* Boss telegraphing */
+        case 27u: *color_id = 7u;  *ansi_seq = "\x1b[1;35m"; *glyph = "BW"; break; /* Bone Warden Boss */
+        case 28u: *color_id = 6u;  *ansi_seq = "\x1b[1;31m"; *glyph = "!!"; break; /* Boss danger zone */
+        case 29u: *color_id = 6u;  *ansi_seq = "\x1b[1;31m"; *glyph = "*V"; break; /* Vampiric Fang Relic */
+        case 30u: *color_id = 8u;  *ansi_seq = "\x1b[1;36m"; *glyph = "*A"; break; /* Arcane Ring Relic */
         default:  *color_id = 0u;  *ansi_seq = "";           *glyph = "  "; break;
     }
 }
@@ -2048,13 +2376,24 @@ static void render_top_banner(char *frame, uint16_t *pos, uint16_t cap)
     }
     else
     {
-        *pos = buf_puts(frame, *pos, cap, "\x1b[1;37;44m MSP430 DUNGEON  FL:");
+        *pos = buf_puts(frame, *pos, cap, "\x1b[1;37;44m MSP430 DUNGEON FL:");
         *pos = buf_put_u8_pad2(frame, *pos, cap, s_floor);
-        *pos = buf_puts(frame, *pos, cap, "  BEST:");
+        *pos = buf_puts(frame, *pos, cap, " BEST:");
         *pos = buf_put_u8_pad2(frame, *pos, cap, (uint8_t)s_best_floor);
-        *pos = buf_puts(frame, *pos, cap, is_cave_floor(s_floor)
-            ? "  BIOME: FUNGAL CAVERNS                          \x1b[0m"
-            : "  BIOME: STONE CRYPT                             \x1b[0m");
+        *pos = buf_puts(frame, *pos, cap, " SEED:");
+        *pos = buf_put_hex16(frame, *pos, cap, s_run_seed);
+        if (is_boss_floor(s_floor))
+        {
+            *pos = buf_puts(frame, *pos, cap, "  BIOME: BOSS SANCTUM                    \x1b[0m");
+        }
+        else if (is_cave_floor(s_floor))
+        {
+            *pos = buf_puts(frame, *pos, cap, "  BIOME: FUNGAL CAVERNS                  \x1b[0m");
+        }
+        else
+        {
+            *pos = buf_puts(frame, *pos, cap, "  BIOME: STONE CRYPT                     \x1b[0m");
+        }
     }
     frame_flush_if_needed(frame, pos, cap);
 }
@@ -2108,15 +2447,17 @@ static void render_sidebar(char *frame, uint16_t *pos, uint16_t cap)
     *pos = buf_puts(frame, *pos, cap, s_empowered ? " \x1b[1;32m[EMP]\x1b[0m      " : "            ");
     frame_flush_if_needed(frame, pos, cap);
 
-    /* Row 5: Facing & Pos */
+    /* Row 5: Class, Facing & Pos */
     *pos = buf_put_cup(frame, *pos, cap, 5u, 58u);
-    *pos = buf_puts(frame, *pos, cap, "\x1b[90mDIR:");
+    *pos = buf_puts(frame, *pos, cap, "\x1b[1;37m");
+    *pos = buf_puts(frame, *pos, cap, k_class_short[s_class < 3u ? s_class : 0u]);
+    *pos = buf_puts(frame, *pos, cap, "\x1b[90m DIR:");
     if (*pos < cap) { frame[(*pos)++] = DIR_CH[s_dir & 0x03u]; }
-    *pos = buf_puts(frame, *pos, cap, " POS:");
+    *pos = buf_puts(frame, *pos, cap, " ");
     *pos = buf_put_u8_pad2(frame, *pos, cap, s_px);
     *pos = buf_puts(frame, *pos, cap, ",");
     *pos = buf_put_u8_pad2(frame, *pos, cap, s_py);
-    *pos = buf_puts(frame, *pos, cap, "      \x1b[0m");
+    *pos = buf_puts(frame, *pos, cap, "\x1b[0m\x1b[K");
     frame_flush_if_needed(frame, pos, cap);
 
     /* Row 6-7: Divider + Nearby Foes header */
@@ -2143,8 +2484,9 @@ static void render_sidebar(char *frame, uint16_t *pos, uint16_t cap)
         }
         else
         {
+            const char *aim_g = (e->type == ENEMY_BOSS) ? "B!" : "A!";
             *pos = buf_puts(frame, *pos, cap, def->ansi);
-            *pos = buf_puts(frame, *pos, cap, (e->flags & EF_AIMING) ? "A!" : def->glyph);
+            *pos = buf_puts(frame, *pos, cap, (e->flags & EF_AIMING) ? aim_g : def->glyph);
             *pos = buf_puts(frame, *pos, cap, "\x1b[0m ");
         }
         *pos = buf_puts(frame, *pos, cap, def->name);
@@ -2181,26 +2523,134 @@ static void render_sidebar(char *frame, uint16_t *pos, uint16_t cap)
     *pos = buf_put_cup(frame, *pos, cap, 13u, 58u);
     *pos = buf_puts(frame, *pos, cap, "\x1b[1;33m[3]Map:\x1b[0m");
     *pos = buf_put_u8_dec(frame, *pos, cap, s_scrolls);
-    *pos = buf_puts(frame, *pos, cap, "             ");
+    *pos = buf_puts(frame, *pos, cap, "\x1b[K");
+    frame_flush_if_needed(frame, pos, cap);
+
+    /* Row 17: Active Relics */
+    *pos = buf_put_cup(frame, *pos, cap, 17u, 58u);
+    if (s_relics == 0u)
+    {
+        *pos = buf_puts(frame, *pos, cap, "\x1b[90mREL:(none)\x1b[0m\x1b[K");
+    }
+    else
+    {
+        *pos = buf_puts(frame, *pos, cap, "\x1b[1;35mREL:\x1b[0m");
+        if ((s_relics & RELIC_VAMP) != 0u)   { *pos = buf_puts(frame, *pos, cap, "[VAMP]"); }
+        if ((s_relics & RELIC_ARCANE) != 0u) { *pos = buf_puts(frame, *pos, cap, "[ARC]"); }
+        *pos = buf_puts(frame, *pos, cap, "\x1b[K");
+    }
+    frame_flush_if_needed(frame, pos, cap);
+
+    /* Row 18: Boss HP Bar (if Boss alive) or quick shortcuts */
+    *pos = buf_put_cup(frame, *pos, cap, 18u, 58u);
+    if (s_enemies[0].type == ENEMY_BOSS)
+    {
+        uint8_t mhp = (s_enemies[0].max_hp > 0u) ? s_enemies[0].max_hp : 1u;
+        uint8_t bars = (uint8_t)(((uint16_t)s_enemies[0].hp * 8u + (mhp - 1u)) / mhp);
+        uint8_t bi;
+        *pos = buf_puts(frame, *pos, cap, "\x1b[1;35mBOSS[\x1b[1;31m");
+        for (bi = 0u; bi < 8u; bi++)
+        {
+            if (*pos < cap) { frame[(*pos)++] = (bi < bars) ? '#' : '-'; }
+        }
+        *pos = buf_puts(frame, *pos, cap, "\x1b[1;35m]");
+        *pos = buf_put_u8_dec(frame, *pos, cap, s_enemies[0].hp);
+        *pos = buf_puts(frame, *pos, cap, "\x1b[0m\x1b[K");
+    }
+    else
+    {
+        *pos = buf_puts(frame, *pos, cap, "\x1b[90mM:Map H:HoF ?:Help\x1b[0m\x1b[K");
+    }
     frame_flush_if_needed(frame, pos, cap);
 }
 
 static void render_sidebar_static_legend(char *frame, uint16_t *pos, uint16_t cap)
 {
-    static const char *const k_leg[5] = {
+    static const char *const k_leg[3] = {
         "\x1b[90m---------------------\x1b[0m",
         "\x1b[1;34mF\x1b[0m:Bolt(1) \x1b[1;36mQ\x1b[0m:Nova(2)",
-        "\x1b[1;35mE\x1b[0m:Blink(2) \x1b[1;32mSpc\x1b[0m:Med",
-        "\x1b[1;32m$$\x1b[0mShop \x1b[1;35m &\x1b[0mShrine \x1b[1;33m>\x1b[0mSt",
-        "\x1b[90mM:Map  C:Ctr  ?:Help\x1b[0m"
+        "\x1b[1;35mE\x1b[0m:Blink(2) \x1b[1;32mSpc\x1b[0m:Med"
     };
     uint8_t i;
-    for (i = 0u; i < 5u; i++)
+    for (i = 0u; i < 3u; i++)
     {
         *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(14u + i), 58u);
         *pos = buf_puts(frame, *pos, cap, k_leg[i]);
         frame_flush_if_needed(frame, pos, cap);
     }
+}
+
+static void render_class_select_overlay(char *frame, uint16_t *pos, uint16_t cap)
+{
+    static const char *const k_cls[14] = {
+        " \x1b[1;33mCHOOSE YOUR HERO CLASS:\x1b[0m",
+        " ",
+        "   \x1b[1;32m[1] KNIGHT   (KNT)\x1b[0m  HP:16  MP:4  ATK:3  DEF:1  Belt: 1 Pot",
+        "       Sturdy frontline brawler. Highest HP, ATK, and starting armor.",
+        " ",
+        "   \x1b[1;36m[2] ARCANIST (ARC)\x1b[0m  HP:11  MP:8  ATK:2  DEF:0  Belt: 1 Pot, 1 Bmb",
+        "       Master of spells. Arcane Bolt (F) PIERCES up to 2 enemies!",
+        " ",
+        "   \x1b[1;35m[3] ROGUE    (ROG)\x1b[0m  HP:12  MP:5  ATK:2  DEF:0  Belt: 1 Pot/Bmb/Map +25G",
+        "       +1 vision radius, spots traps at range 4, +2 CRIT on first strike!",
+        " ",
+        " \x1b[90m----------------------------------------------------------------------------\x1b[0m",
+        "   Press \x1b[1;37m1 / 2 / 3\x1b[0m to start  |  \x1b[1;37mR\x1b[0m: Load FRAM Save  |  \x1b[1;37mH\x1b[0m: Hall of Fame",
+        "   (LaunchPad S2 starts Knight immediately)"
+    };
+    uint8_t i;
+
+    *pos = buf_puts(frame, *pos, cap,
+        "\x1b[2J\x1b[H\x1b[?25l\x1b[1;37;44m MSP430FR5994 DUNGEON CRAWLER                         NEW ADVENTURE             \x1b[0m");
+    frame_flush_if_needed(frame, pos, cap);
+
+    for (i = 0u; i < 14u; i++)
+    {
+        *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(i + 3u), 1u);
+        *pos = buf_puts(frame, *pos, cap, k_cls[i]);
+        frame_flush_if_needed(frame, pos, cap);
+    }
+}
+
+static void render_hof_overlay(char *frame, uint16_t *pos, uint16_t cap)
+{
+    uint8_t i;
+
+    *pos = buf_puts(frame, *pos, cap,
+        "\x1b[2J\x1b[H\x1b[?25l\x1b[1;37;44m FRAM HALL OF FAME (TOP 5 RUNS)            PRESS H OR ANY KEY TO CLOSE          \x1b[0m");
+    frame_flush_if_needed(frame, pos, cap);
+
+    *pos = buf_put_cup(frame, *pos, cap, 3u, 4u);
+    *pos = buf_puts(frame, *pos, cap, "\x1b[1;33mRANK   CLASS   FLOOR   GOLD    SEED\x1b[0m");
+    *pos = buf_put_cup(frame, *pos, cap, 4u, 4u);
+    *pos = buf_puts(frame, *pos, cap, "\x1b[90m-------------------------------------\x1b[0m");
+    frame_flush_if_needed(frame, pos, cap);
+
+    for (i = 0u; i < DNG_HOF_ENTRIES; i++)
+    {
+        *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(5u + i), 4u);
+        *pos = buf_puts(frame, *pos, cap, "#");
+        *pos = buf_put_u8_dec(frame, *pos, cap, (uint8_t)(i + 1u));
+        if (s_hof[i].valid)
+        {
+            *pos = buf_puts(frame, *pos, cap, "     ");
+            *pos = buf_puts(frame, *pos, cap, k_class_short[s_hof[i].cls < 3u ? s_hof[i].cls : 0u]);
+            *pos = buf_puts(frame, *pos, cap, "     FL:");
+            *pos = buf_put_u8_pad2(frame, *pos, cap, s_hof[i].floor);
+            *pos = buf_puts(frame, *pos, cap, "   ");
+            *pos = buf_put_u16_pad4(frame, *pos, cap, s_hof[i].gold);
+            *pos = buf_puts(frame, *pos, cap, "G   ");
+            *pos = buf_put_hex16(frame, *pos, cap, s_hof[i].seed);
+        }
+        else
+        {
+            *pos = buf_puts(frame, *pos, cap, "     \x1b[90m---     --      ----    ----\x1b[0m");
+        }
+        frame_flush_if_needed(frame, pos, cap);
+    }
+
+    *pos = buf_put_cup(frame, *pos, cap, 12u, 4u);
+    *pos = buf_puts(frame, *pos, cap, "\x1b[90mStored in non-volatile MSP430 FRAM (survives USB power loss).\x1b[0m");
 }
 
 static void render_help_overlay(char *frame, uint16_t *pos, uint16_t cap)
@@ -2213,17 +2663,17 @@ static void render_help_overlay(char *frame, uint16_t *pos, uint16_t cap)
         "   Q (2 MP)      : Frost Nova (3x3 AoE dmg + freezes foes 2 turns)",
         "   E (2 MP)      : Blink (teleport up to 3 tiles in facing direction)",
         "   1 / 2 / 3     : Drink Potion (+6 HP) / Bomb (3x3) / Mapping Scroll",
-        "   M / C / ?     : Full 48x22 Map / Re-center Camera / This Help",
+        "   M / C / H / ? : Full 48x22 Map / Re-center / Hall of Fame / This Help",
         "   P / R / X     : FRAM Save / Restore / Erase  (Ctrl+L: Redraw)",
         " ",
         " \x1b[1;33mMAP LEGEND:\x1b[0m",
         "   \x1b[1;32m^^ >> vv <<\x1b[0m You    \x1b[33m++\x1b[0m Door   \x1b[33m%%\x1b[0m Cracked Wall   \x1b[1;31m^\x1b[0m Spike Trap (2 dmg)",
-        "   \x1b[1;35m&\x1b[0m Shrine (Odd: -3HP/+1ATK, Even: Full HP/+1DEF)  \x1b[1;32m$$\x1b[0m Shop (Even Fl)",
+        "   \x1b[1;35m&\x1b[0m Shrine   \x1b[1;32m$$\x1b[0m Shop(Even Fl)   \x1b[1;31m*V\x1b[0m/\x1b[1;36m*A\x1b[0m Relics (Vamp / Arcane Ring)",
         "   \x1b[1;36m+\x1b[0m Potion   \x1b[1;34m*\x1b[0m Mana   \x1b[1;33m$\x1b[0m Chest   \x1b[1;33m>\x1b[0m Stairs (Auto-saves to FRAM)",
         " ",
-        " \x1b[1;33mENEMIES:\x1b[0m",
-        "   \x1b[1;31msl\x1b[0m Slime(slow)  \x1b[1;35mSK\x1b[0m Skeleton  \x1b[1;33mAR\x1b[0m/\x1b[1;37;41mA!\x1b[0m Archer(telegraphs!)",
-        "   \x1b[1;36mWR\x1b[0m Wraith(phases walls, -1 MP)   \x1b[1;31mMM\x1b[0m Mimic(disguised as $ Chest!)"
+        " \x1b[1;33mENEMIES & BOSS:\x1b[0m",
+        "   \x1b[1;31msl\x1b[0m Slime(slow)  \x1b[1;35mSK\x1b[0m Skeleton  \x1b[1;33mAR\x1b[0m/\x1b[1;37;41mA!\x1b[0m Archer  \x1b[1;36mWR\x1b[0m Wraith  \x1b[1;31mMM\x1b[0m Mimic",
+        "   \x1b[1;35mBW\x1b[0m/\x1b[1;37;41mB!\x1b[0m Bone Warden (Fl 5 Boss): dodge red \x1b[1;31m!!\x1b[0m Bone Wave cross!"
     };
     uint8_t i;
 
@@ -2298,6 +2748,7 @@ static void render_full_map_overlay(char *frame, uint16_t *pos, uint16_t cap)
                         case DNG_MANA:         cid = 8u; ansi = "\x1b[1;34m"; ch = '*'; break;
                         case DNG_CHEST:        cid = 4u; ansi = "\x1b[1;33m"; ch = '$'; break;
                         case DNG_SHOP:         cid = 1u; ansi = "\x1b[1;32m"; ch = '$'; break;
+                        case DNG_RELIC:        cid = 6u; ansi = "\x1b[1;35m"; ch = '*'; break;
                         default:               cid = 3u; ansi = "\x1b[90m";   ch = '.'; break;
                     }
                 }
@@ -2335,6 +2786,20 @@ static void render_if_dirty(void)
         return;
     }
     s_dirty = false;
+
+    if (s_hof_mode)
+    {
+        render_hof_overlay(frame, &pos, cap);
+        if (pos > 0u) { uart_write_all(UART_A0, frame, pos); }
+        return;
+    }
+
+    if (s_class_select)
+    {
+        render_class_select_overlay(frame, &pos, cap);
+        if (pos > 0u) { uart_write_all(UART_A0, frame, pos); }
+        return;
+    }
 
     if (s_help_mode)
     {
@@ -2499,8 +2964,53 @@ static void handle_command(uint8_t cmd)
         return;
     }
 
+    /* Toggle FRAM Hall of Fame overlay */
+    if (cmd == 'h' || cmd == 'H')
+    {
+        s_hof_mode  = !s_hof_mode;
+        s_help_mode = false;
+        s_map_mode  = false;
+        s_full_redraw = true;
+        s_dirty = true;
+        return;
+    }
+
+    /* Any other command exits Hall of Fame overlay first */
+    if (s_hof_mode)
+    {
+        s_hof_mode = false;
+        s_full_redraw = true;
+        s_dirty = true;
+        return;
+    }
+
+    /* Class selection screen on new run */
+    if (s_class_select)
+    {
+        if (cmd == '1' || cmd == 'w' || cmd == 'W' || cmd == ' ' || cmd == CMD_STEP_FWD)
+        {
+            start_new_run_with_class(CLASS_KNIGHT);
+        }
+        else if (cmd == '2')
+        {
+            start_new_run_with_class(CLASS_ARCANIST);
+        }
+        else if (cmd == '3')
+        {
+            start_new_run_with_class(CLASS_ROGUE);
+        }
+        else if (cmd == 'r' || cmd == 'R')
+        {
+            if (!load_checkpoint(true))
+            {
+                s_dirty = true;
+            }
+        }
+        return;
+    }
+
     /* Toggle Help overlay */
-    if (cmd == '?' || cmd == 'h' || cmd == 'H')
+    if (cmd == '?')
     {
         s_help_mode = !s_help_mode;
         s_map_mode  = false;
@@ -2708,12 +3218,12 @@ void dungeon_game_process(void)
         bool was_dirty = s_dirty;
 
         /* Low-HP heartbeat: blink Red LED1 + pulse red banner every 500 ms, beep BEL every 2.0 s */
-        if (is_low_hp())
+        if (!s_class_select && is_low_hp())
         {
             s_was_low_hp = true;
             s_low_hp_pulse = !s_low_hp_pulse;
             board_led1(s_low_hp_pulse);
-            if (s_terminal_connected && !s_map_mode && !s_help_mode)
+            if (s_terminal_connected && !s_map_mode && !s_help_mode && !s_hof_mode)
             {
                 s_dirty = true;
             }

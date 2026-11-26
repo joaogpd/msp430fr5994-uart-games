@@ -30,10 +30,12 @@ typedef enum
     DNG_POTION       = 8,
     DNG_MANA         = 9,
     DNG_CHEST        = 10,
-    DNG_SHOP         = 11
+    DNG_SHOP         = 11,
+    DNG_RELIC        = 12
 } dng_tile_t;
 
 #define DNG_MAX_SHOP_ITEMS  3u
+#define DNG_HOF_ENTRIES     5u
 
 /* High 4 bits of each packed map byte store per-tile flags */
 #define TILE_TYPE_MASK      0x0Fu
@@ -49,8 +51,20 @@ typedef enum
     ENEMY_SKELETON = 2,
     ENEMY_ARCHER   = 3,
     ENEMY_WRAITH   = 4,
-    ENEMY_MIMIC    = 5
+    ENEMY_MIMIC    = 5,
+    ENEMY_BOSS     = 6
 } dng_enemy_type_t;
+
+typedef enum
+{
+    CLASS_KNIGHT   = 0,
+    CLASS_ARCANIST = 1,
+    CLASS_ROGUE    = 2
+} dng_class_t;
+
+/* Permanent relic bitmask */
+#define RELIC_VAMP          0x01u   /* Vampiric Fang: +1 HP on every enemy kill */
+#define RELIC_ARCANE        0x02u   /* Arcane Ring: +2 Max MP & +1 MP per floor */
 
 void dungeon_game_init(void);
 
