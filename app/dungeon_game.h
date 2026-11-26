@@ -29,8 +29,11 @@ typedef enum
     DNG_SHRINE       = 7,
     DNG_POTION       = 8,
     DNG_MANA         = 9,
-    DNG_CHEST        = 10
+    DNG_CHEST        = 10,
+    DNG_SHOP         = 11
 } dng_tile_t;
+
+#define DNG_MAX_SHOP_ITEMS  3u
 
 /* High 4 bits of each packed map byte store per-tile flags */
 #define TILE_TYPE_MASK      0x0Fu

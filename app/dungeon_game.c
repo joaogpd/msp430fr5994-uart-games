@@ -21,6 +21,28 @@
 #define EF_AIMING           0x01u   /* Archer telegraphed shot ready to fire next turn */
 #define EF_AWAKE            0x02u   /* Mimic revealed and hostile */
 #define EF_SLOW_SKIP        0x04u   /* Slime moves every 2nd turn */
+#define EF_FREEZE_SHIFT     3u      /* Bits 3..4 store 0..3 frozen turns */
+#define EF_FREEZE_MASK      0x18u
+
+typedef enum
+{
+    SHOP_NONE = 0,
+    SHOP_ATK  = 1,
+    SHOP_DEF  = 2,
+    SHOP_POT  = 3,
+    SHOP_BOMB = 4,
+    SHOP_MAP  = 5
+} dng_shop_kind_t;
+
+typedef struct
+{
+    uint8_t x;
+    uint8_t y;
+    uint8_t kind;
+    uint8_t cost;
+    uint8_t sold;
+    uint8_t pad;
+} dng_shop_slot_t;
 
 typedef struct
 {
@@ -72,11 +94,15 @@ typedef struct
     uint8_t     def;
     uint8_t     px;
     uint8_t     py;
-    uint8_t     dir;            /* 0=N, 1=E, 2=S, 3=W */
-    uint8_t     empowered;
-    uint8_t     has_saved_run;
-    uint8_t     map[DNG_H][DNG_W];
-    dng_enemy_t enemies[DNG_MAX_ENEMIES];
+    uint8_t         dir;            /* 0=N, 1=E, 2=S, 3=W */
+    uint8_t         empowered;
+    uint8_t         has_saved_run;
+    uint8_t         potions;
+    uint8_t         bombs;
+    uint8_t         scrolls;
+    dng_shop_slot_t shop[DNG_MAX_SHOP_ITEMS];
+    uint8_t         map[DNG_H][DNG_W];
+    dng_enemy_t     enemies[DNG_MAX_ENEMIES];
 } dng_ckpt_t;
 
 typedef char ckpt_size_check[(sizeof(dng_ckpt_t) <= CKPT_MAX_PAYLOAD) ? 1 : -1];
@@ -124,10 +150,19 @@ static uint8_t  s_def;
 static bool          s_empowered;
 static volatile bool s_game_over;
 static bool          s_has_saved_run;
-static bool     s_dirty;
-static bool     s_full_redraw;
-static bool     s_map_mode;
-static uint16_t s_rng = 0x5D17u;
+static bool          s_dirty;
+static bool          s_full_redraw;
+static bool          s_map_mode;
+static bool          s_help_mode;
+static uint8_t       s_potions;
+static uint8_t       s_bombs;
+static uint8_t       s_scrolls;
+static dng_shop_slot_t s_shop[DNG_MAX_SHOP_ITEMS];
+static uint8_t       s_shop_preview = 255u;
+static bool          s_low_hp_pulse = false;
+static bool          s_was_low_hp = false;
+static uint8_t       s_low_hp_beep_ticks = 0u;
+static uint16_t      s_rng = 0x5D17u;
 static char     s_status_msg[STATUS_LEN + 1u];
 
 static dng_btn_t        s_btn;
@@ -180,7 +215,50 @@ static bool tile_blocks_los(uint8_t t)
 
 static bool tile_blocks_move(uint8_t t)
 {
-    return (t == DNG_WALL || t == DNG_CRACKED_WALL || t == DNG_DOOR_CLOSED);
+    return (t == DNG_WALL || t == DNG_CRACKED_WALL || t == DNG_DOOR_CLOSED || t == DNG_SHOP);
+}
+
+static bool is_low_hp(void)
+{
+    return (!s_game_over && s_hp > 0u &&
+            (s_hp <= 3u || (uint16_t)((uint16_t)s_hp * 4u) <= (uint16_t)s_max_hp));
+}
+
+static uint8_t enemy_freeze_turns(const dng_enemy_t *e)
+{
+    return (uint8_t)((e->flags & EF_FREEZE_MASK) >> EF_FREEZE_SHIFT);
+}
+
+static void enemy_set_freeze(dng_enemy_t *e, uint8_t turns)
+{
+    if (turns > 3u) { turns = 3u; }
+    e->flags = (uint8_t)((e->flags & (uint8_t)~EF_FREEZE_MASK) | (uint8_t)(turns << EF_FREEZE_SHIFT));
+}
+
+static int8_t find_shop_at(uint8_t x, uint8_t y)
+{
+    uint8_t i;
+    for (i = 0u; i < DNG_MAX_SHOP_ITEMS; i++)
+    {
+        if (!s_shop[i].sold && s_shop[i].kind != SHOP_NONE && s_shop[i].x == x && s_shop[i].y == y)
+        {
+            return (int8_t)i;
+        }
+    }
+    return -1;
+}
+
+static const char *shop_kind_name(uint8_t kind)
+{
+    switch (kind)
+    {
+        case SHOP_ATK:  return "+1 ATK SWORD";
+        case SHOP_DEF:  return "+1 DEF ARMOR";
+        case SHOP_POT:  return "HEALTH POTION";
+        case SHOP_BOMB: return "DUNGEON BOMB";
+        case SHOP_MAP:  return "MAPPING SCROLL";
+        default:        return "ITEM";
+    }
 }
 
 static bool is_cave_floor(uint8_t fl)
@@ -389,6 +467,10 @@ static bool commit_checkpoint(bool save_active_run)
     s_ckpt_stage.dir           = s_dir;
     s_ckpt_stage.empowered     = s_empowered ? 1u : 0u;
     s_ckpt_stage.has_saved_run = s_has_saved_run ? 1u : 0u;
+    s_ckpt_stage.potions       = s_potions;
+    s_ckpt_stage.bombs         = s_bombs;
+    s_ckpt_stage.scrolls       = s_scrolls;
+    memcpy(s_ckpt_stage.shop, s_shop, sizeof(s_shop));
     memcpy(s_ckpt_stage.map, s_map, sizeof(s_map));
     memcpy(s_ckpt_stage.enemies, s_enemies, sizeof(s_enemies));
 
@@ -425,8 +507,17 @@ static bool load_checkpoint(bool restore_full_run)
         s_py        = (s_ckpt_stage.py < DNG_H) ? s_ckpt_stage.py : 2u;
         s_dir       = s_ckpt_stage.dir & 0x03u;
         s_empowered = (s_ckpt_stage.empowered != 0u);
+        s_potions   = s_ckpt_stage.potions;
+        s_bombs     = s_ckpt_stage.bombs;
+        s_scrolls   = s_ckpt_stage.scrolls;
+        s_shop_preview = 255u;
         s_game_over = false;
         s_map_mode  = false;
+        s_help_mode = false;
+        s_was_low_hp = is_low_hp();
+        s_low_hp_pulse = false;
+        s_low_hp_beep_ticks = 0u;
+        memcpy(s_shop, s_ckpt_stage.shop, sizeof(s_shop));
         memcpy(s_map, s_ckpt_stage.map, sizeof(s_map));
         memcpy(s_enemies, s_ckpt_stage.enemies, sizeof(s_enemies));
         compute_los();
@@ -587,6 +678,46 @@ static void spawn_enemy(uint8_t slot, uint8_t x, uint8_t y, uint8_t type)
     s_enemies[slot].aim_dy = 0;
 }
 
+static void place_shop(void)
+{
+    uint8_t i, tries;
+    uint8_t kinds[DNG_MAX_SHOP_ITEMS];
+    uint8_t costs[DNG_MAX_SHOP_ITEMS];
+    uint8_t scale = (uint8_t)((s_floor <= 10u) ? (s_floor * 5u) : 50u);
+
+    kinds[0] = SHOP_ATK;
+    costs[0] = (uint8_t)(25u + scale);
+    kinds[1] = SHOP_DEF;
+    costs[1] = (uint8_t)(30u + scale);
+    kinds[2] = (uint8_t)(SHOP_POT + (next_rand() % 3u)); /* Pot, Bomb, or Map */
+    costs[2] = (kinds[2] == SHOP_POT) ? 15u : ((kinds[2] == SHOP_BOMB) ? 20u : 18u);
+
+    for (i = 0u; i < DNG_MAX_SHOP_ITEMS; i++)
+    {
+        for (tries = 0u; tries < 80u; tries++)
+        {
+            uint8_t c = (uint8_t)(2u + (next_rand() % (DNG_W - 4u)));
+            uint8_t r = (uint8_t)(2u + (next_rand() % (DNG_H - 4u)));
+            if (tile_type(c, r) != DNG_FLOOR || (c == s_px && r == s_py)) { continue; }
+            /* Only place pedestals in open rooms (never blocking 1-tile corridors) */
+            if (tile_type((uint8_t)(c - 1u), r) != DNG_FLOOR ||
+                tile_type((uint8_t)(c + 1u), r) != DNG_FLOOR ||
+                tile_type(c, (uint8_t)(r - 1u)) != DNG_FLOOR ||
+                tile_type(c, (uint8_t)(r + 1u)) != DNG_FLOOR)
+            {
+                continue;
+            }
+            s_map[r][c]    = DNG_SHOP;
+            s_shop[i].x    = c;
+            s_shop[i].y    = r;
+            s_shop[i].kind = kinds[i];
+            s_shop[i].cost = costs[i];
+            s_shop[i].sold = 0u;
+            break;
+        }
+    }
+}
+
 static void generate_floor(void)
 {
     uint8_t i, x, y;
@@ -594,6 +725,8 @@ static void generate_floor(void)
 
     memset(s_map, DNG_WALL, sizeof(s_map));
     memset(s_enemies, 0, sizeof(s_enemies));
+    memset(s_shop, 0, sizeof(s_shop));
+    s_shop_preview = 255u;
 
     if (is_cave_floor(s_floor))
     {
@@ -713,6 +846,12 @@ static void generate_floor(void)
         s_map[y][x] = (uint8_t)(DNG_SHRINE | (((s_floor & 1u) == 0u) ? TILE_F_ALT : 0u));
     }
 
+    /* In-world Dungeon Shop on every even floor (3 pedestals in open rooms) */
+    if ((s_floor & 1u) == 0u)
+    {
+        place_shop();
+    }
+
     /* 4 Spike Traps per floor (hidden until within 2 tiles) */
     for (i = 0u; i < 4u; i++)
     {
@@ -779,14 +918,22 @@ static void start_new_run(void)
     s_atk       = 2u;
     s_def       = 0u;
     s_dir       = 1u;
+    s_potions   = 1u;
+    s_bombs     = 1u;
+    s_scrolls   = 0u;
+    s_shop_preview = 255u;
     s_empowered = false;
     s_game_over = false;
     s_map_mode  = false;
+    s_help_mode = false;
+    s_was_low_hp = false;
+    s_low_hp_pulse = false;
+    s_low_hp_beep_ticks = 0u;
 
     board_led1(false);
     board_led2(false);
     generate_floor();
-    set_status("WELCOME! EXPLORE THE 48x22 DUNGEON. PRESS M FOR FULL MAP.");
+    set_status("WELCOME! PRESS ? FOR HELP, M FOR FULL MAP, 1-3 FOR BELT ITEMS.");
     s_full_redraw = true;
     s_dirty = true;
 }
@@ -803,6 +950,10 @@ void dungeon_game_init(void)
     s_esc_state          = 0u;
     s_full_redraw        = true;
     s_map_mode           = false;
+    s_help_mode          = false;
+    s_was_low_hp         = false;
+    s_low_hp_pulse       = false;
+    s_low_hp_beep_ticks  = 0u;
     s_best_floor         = 1u;
     s_has_saved_run      = false;
 
@@ -962,11 +1113,29 @@ static void damage_player(uint8_t raw_dmg, const char *source_name)
     {
         s_hp = (uint8_t)(s_hp - dmg);
         set_status_combat("", source_name, dmg, " DMG! (", s_hp, " HP LEFT)");
+        if (is_low_hp())
+        {
+            if (!s_was_low_hp)
+            {
+                s_was_low_hp = true;
+                s_low_hp_pulse = true;
+                s_low_hp_beep_ticks = 0u;
+                board_led1(true);
+                s_full_redraw = true;
+            }
+            if (s_terminal_connected)
+            {
+                static const char bel = '\x07';
+                (void)uart_write(UART_A0, &bel, 1u);
+            }
+        }
     }
     else
     {
         s_hp = 0u;
         s_game_over = true;
+        s_was_low_hp = false;
+        s_low_hp_pulse = false;
         board_led1(true);
         /* Never overwrite an active FRAM save with dead (0 HP) state */
         if (!s_has_saved_run)
@@ -974,6 +1143,7 @@ static void damage_player(uint8_t raw_dmg, const char *source_name)
             (void)commit_checkpoint(false);
         }
         set_status("YOU DIED! PRESS W/SPACE FOR NEW RUN, OR R TO LOAD FRAM SAVE.");
+        s_full_redraw = true;
     }
 }
 
@@ -1027,6 +1197,15 @@ static void monster_turn(void)
         /* Dormant Mimic waits until bumped/attacked */
         if (e->type == ENEMY_MIMIC && (e->flags & EF_AWAKE) == 0u)
         {
+            continue;
+        }
+
+        /* Frozen enemies skip their turn and thaw by 1 */
+        uint8_t frz = enemy_freeze_turns(e);
+        if (frz > 0u)
+        {
+            enemy_set_freeze(e, (uint8_t)(frz - 1u));
+            e->flags &= (uint8_t)~EF_AIMING;
             continue;
         }
 
@@ -1228,6 +1407,253 @@ static void cast_arcane_bolt(void)
     s_dirty = true;
 }
 
+static void cast_frost_nova(void)
+{
+    if (s_mana < 2u)
+    {
+        set_status("FROST NOVA NEEDS 2 MP! PRESS SPACE TO MEDITATE.");
+        s_dirty = true;
+        return;
+    }
+
+    s_mana = (uint8_t)(s_mana - 2u);
+    uint8_t dmg = (uint8_t)(s_atk + (s_empowered ? 1u : 0u));
+    s_empowered = false;
+
+    uint8_t i, hits = 0u;
+    for (i = 0u; i < DNG_MAX_ENEMIES; i++)
+    {
+        dng_enemy_t *e = &s_enemies[i];
+        if (e->type == ENEMY_NONE) { continue; }
+        if (u8_abs_diff(e->x, s_px) <= 1u && u8_abs_diff(e->y, s_py) <= 1u)
+        {
+            enemy_set_freeze(e, 2u);
+            e->flags &= (uint8_t)~EF_AIMING;
+            damage_enemy(i, dmg, true);
+            hits++;
+        }
+    }
+
+    if (hits > 0u)
+    {
+        set_status_combat("FROST NOVA FROZE", "", hits, " FOE(S) FOR 2 TURNS!", 255u, "");
+    }
+    else
+    {
+        set_status("FROST NOVA CHILLED THE AIR (NO ADJACENT FOES).");
+    }
+
+    monster_turn();
+    s_dirty = true;
+}
+
+static void cast_blink(void)
+{
+    if (s_mana < 2u)
+    {
+        set_status("BLINK NEEDS 2 MP! PRESS SPACE TO MEDITATE.");
+        s_dirty = true;
+        return;
+    }
+
+    uint8_t step;
+    int8_t best_x = -1, best_y = -1;
+    int8_t cx = (int8_t)s_px;
+    int8_t cy = (int8_t)s_py;
+
+    for (step = 1u; step <= 3u; step++)
+    {
+        cx = (int8_t)(cx + DIR_DX[s_dir]);
+        cy = (int8_t)(cy + DIR_DY[s_dir]);
+        if (cx <= 0 || cx >= (int8_t)(DNG_W - 1u) || cy <= 0 || cy >= (int8_t)(DNG_H - 1u))
+        {
+            break;
+        }
+        uint8_t t = tile_type((uint8_t)cx, (uint8_t)cy);
+        if (tile_blocks_move(t) || t == DNG_SHOP)
+        {
+            break;
+        }
+        if (find_enemy_at((uint8_t)cx, (uint8_t)cy) < 0)
+        {
+            best_x = cx;
+            best_y = cy;
+        }
+    }
+
+    if (best_x < 0)
+    {
+        set_status("BLINK BLOCKED! TURN TO AN OPEN DIRECTION.");
+        s_dirty = true;
+        return;
+    }
+
+    s_mana = (uint8_t)(s_mana - 2u);
+    s_px = (uint8_t)best_x;
+    s_py = (uint8_t)best_y;
+    s_shop_preview = 255u;
+    compute_los();
+    update_camera(false);
+    set_status("BLINKED THROUGH SHADOWS (-2 MP)!");
+    monster_turn();
+    s_dirty = true;
+}
+
+static void use_potion(void)
+{
+    if (s_potions == 0u)
+    {
+        set_status("NO POTIONS IN BELT! FIND (+) OR BUY AT SHOP ($$).");
+        s_dirty = true;
+        return;
+    }
+    if (s_hp >= s_max_hp)
+    {
+        set_status("ALREADY AT FULL HP!");
+        s_dirty = true;
+        return;
+    }
+
+    s_potions--;
+    s_hp = (uint8_t)(s_hp + 6u);
+    if (s_hp > s_max_hp) { s_hp = s_max_hp; }
+    if (!is_low_hp() && s_was_low_hp)
+    {
+        s_was_low_hp = false;
+        s_low_hp_pulse = false;
+        board_led1(false);
+        s_full_redraw = true;
+    }
+    set_status("DRANK HEALTH POTION (+6 HP)!");
+    monster_turn();
+    s_dirty = true;
+}
+
+static void use_bomb(void)
+{
+    if (s_bombs == 0u)
+    {
+        set_status("NO BOMBS IN BELT! FIND CHESTS ($) OR BUY AT SHOP ($$).");
+        s_dirty = true;
+        return;
+    }
+
+    s_bombs--;
+    uint8_t dmg = (uint8_t)(s_atk + 4u);
+    int8_t dy, dx;
+    uint8_t i, hits = 0u;
+
+    /* Shatter inner walls & cracked walls in 3x3 around player */
+    for (dy = -1; dy <= 1; dy++)
+    {
+        for (dx = -1; dx <= 1; dx++)
+        {
+            int8_t nx = (int8_t)s_px + dx;
+            int8_t ny = (int8_t)s_py + dy;
+            if (nx > 1 && nx < (int8_t)(DNG_W - 2u) && ny > 1 && ny < (int8_t)(DNG_H - 2u))
+            {
+                uint8_t t = tile_type((uint8_t)nx, (uint8_t)ny);
+                if (t == DNG_CRACKED_WALL || t == DNG_WALL)
+                {
+                    set_tile_type((uint8_t)nx, (uint8_t)ny, DNG_FLOOR);
+                }
+            }
+        }
+    }
+
+    for (i = 0u; i < DNG_MAX_ENEMIES; i++)
+    {
+        dng_enemy_t *e = &s_enemies[i];
+        if (e->type == ENEMY_NONE) { continue; }
+        if (u8_abs_diff(e->x, s_px) <= 1u && u8_abs_diff(e->y, s_py) <= 1u)
+        {
+            damage_enemy(i, dmg, true);
+            hits++;
+        }
+    }
+
+    compute_los();
+    if (hits > 0u)
+    {
+        set_status_combat("BOOM! BOMB BLASTED", "", hits, " FOE(S) & NEARBY STONE!", 255u, "");
+    }
+    else
+    {
+        set_status("BOOM! BOMB SHATTERED NEARBY STONE WALLS!");
+    }
+    monster_turn();
+    s_dirty = true;
+}
+
+static void use_scroll_mapping(void)
+{
+    if (s_scrolls == 0u)
+    {
+        set_status("NO MAPPING SCROLLS IN BELT! BUY AT SHOP ($$).");
+        s_dirty = true;
+        return;
+    }
+
+    uint8_t r, c;
+    s_scrolls--;
+    for (r = 0u; r < DNG_H; r++)
+    {
+        for (c = 0u; c < DNG_W; c++)
+        {
+            s_map[r][c] |= TILE_F_EXPLORED;
+            if (tile_type(c, r) == DNG_TRAP)
+            {
+                s_map[r][c] |= TILE_F_REVEALED;
+            }
+        }
+    }
+    set_status("SCROLL OF MAPPING: ENTIRE FLOOR & ALL TRAPS REVEALED! (PRESS M)");
+    s_full_redraw = true;
+    s_dirty = true;
+}
+
+static void interact_shop(uint8_t idx)
+{
+    dng_shop_slot_t *sh = &s_shop[idx];
+    if (sh->sold || sh->kind == SHOP_NONE) { return; }
+
+    if (s_shop_preview != idx)
+    {
+        s_shop_preview = idx;
+        set_status_combat("SHOP: ", shop_kind_name(sh->kind), sh->cost, "G. BUMP AGAIN TO BUY!", 255u, "");
+        return;
+    }
+
+    if (s_gold < (uint16_t)sh->cost)
+    {
+        set_status_combat("NEED ", shop_kind_name(sh->kind), sh->cost, "G - NOT ENOUGH GOLD!", 255u, "");
+        return;
+    }
+
+    if ((sh->kind == SHOP_POT && s_potions >= 9u) ||
+        (sh->kind == SHOP_BOMB && s_bombs >= 9u) ||
+        (sh->kind == SHOP_MAP && s_scrolls >= 9u))
+    {
+        set_status("BELT FULL (MAX 9) - USE ONE BEFORE BUYING MORE!");
+        return;
+    }
+
+    s_gold = (uint16_t)(s_gold - sh->cost);
+    sh->sold = 1u;
+    s_shop_preview = 255u;
+    set_tile_type(sh->x, sh->y, DNG_FLOOR);
+
+    switch (sh->kind)
+    {
+        case SHOP_ATK:  s_atk++; set_status("BOUGHT +1 ATK SWORD UPGRADE!"); break;
+        case SHOP_DEF:  s_def++; set_status("BOUGHT +1 DEF ARMOR PLATE!"); break;
+        case SHOP_POT:  if (s_potions < 9u) { s_potions++; } set_status("BOUGHT HEALTH POTION (KEY 1)!"); break;
+        case SHOP_BOMB: if (s_bombs < 9u)   { s_bombs++; }   set_status("BOUGHT DUNGEON BOMB (KEY 2)!"); break;
+        case SHOP_MAP:  if (s_scrolls < 9u) { s_scrolls++; } set_status("BOUGHT MAPPING SCROLL (KEY 3)!"); break;
+        default: break;
+    }
+}
+
 static void activate_shrine(uint8_t x, uint8_t y)
 {
     if ((s_map[y][x] & TILE_F_REVEALED) != 0u)
@@ -1244,6 +1670,13 @@ static void activate_shrine(uint8_t x, uint8_t y)
             s_hp = (uint8_t)(s_hp - 3u);
             s_atk++;
             s_map[y][x] |= TILE_F_REVEALED;
+            if (is_low_hp() && !s_was_low_hp)
+            {
+                s_was_low_hp = true;
+                s_low_hp_pulse = true;
+                board_led1(true);
+                s_full_redraw = true;
+            }
             set_status("BLOOD ALTAR: SACRIFICED 3 HP FOR +1 ATK!");
         }
         else
@@ -1258,6 +1691,13 @@ static void activate_shrine(uint8_t x, uint8_t y)
         if (s_hp < s_max_hp)
         {
             s_hp = s_max_hp;
+            if (!is_low_hp() && s_was_low_hp)
+            {
+                s_was_low_hp = false;
+                s_low_hp_pulse = false;
+                board_led1(false);
+                s_full_redraw = true;
+            }
             set_status("AEGIS FONT: FULLY RESTORED YOUR HP!");
         }
         else
@@ -1315,6 +1755,20 @@ static void step_in_direction(uint8_t dir)
         return;
     }
 
+    /* 2b. Bump Shop Pedestal (1st bump previews, 2nd bump buys!) */
+    if (target == DNG_SHOP)
+    {
+        int8_t si = find_shop_at(nx, ny);
+        if (si >= 0)
+        {
+            interact_shop((uint8_t)si);
+            s_dirty = true;
+            return;
+        }
+    }
+
+    s_shop_preview = 255u;
+
     /* 3. Wall / Cracked Wall block */
     if (target == DNG_CRACKED_WALL)
     {
@@ -1348,9 +1802,24 @@ static void step_in_direction(uint8_t dir)
     else if (target == DNG_POTION)
     {
         set_tile_type(nx, ny, DNG_FLOOR);
-        s_hp = (uint8_t)(s_hp + 5u);
-        if (s_hp > s_max_hp) { s_hp = s_max_hp; }
-        set_status("DRANK HEALTH POTION (+5 HP)!");
+        if (s_potions < 9u)
+        {
+            s_potions++;
+            set_status("STASHED HEALTH POTION IN BELT (PRESS 1 TO DRINK)!");
+        }
+        else
+        {
+            s_hp = (uint8_t)(s_hp + 6u);
+            if (s_hp > s_max_hp) { s_hp = s_max_hp; }
+            if (!is_low_hp() && s_was_low_hp)
+            {
+                s_was_low_hp = false;
+                s_low_hp_pulse = false;
+                board_led1(false);
+                s_full_redraw = true;
+            }
+            set_status("BELT FULL - DRANK HEALTH POTION (+6 HP)!");
+        }
     }
     else if (target == DNG_MANA)
     {
@@ -1365,10 +1834,21 @@ static void step_in_direction(uint8_t dir)
         s_gold = (uint16_t)(s_gold + 25u);
         s_max_hp++;
         s_hp++;
-        if ((next_rand() & 0x03u) == 0u)
+        uint8_t bonus = (uint8_t)(next_rand() & 0x03u);
+        if (bonus == 0u)
         {
             s_atk++;
             set_status("TREASURE CHEST! +25G, +1 MAX HP & +1 ATK!");
+        }
+        else if (bonus == 1u && s_bombs < 9u)
+        {
+            s_bombs++;
+            set_status("TREASURE CHEST! +25G, +1 MAX HP & +1 BOMB (KEY 2)!");
+        }
+        else if (bonus == 2u && s_scrolls < 9u)
+        {
+            s_scrolls++;
+            set_status("TREASURE CHEST! +25G, +1 MAX HP & +1 MAPPING SCROLL (KEY 3)!");
         }
         else
         {
@@ -1451,8 +1931,8 @@ static uint16_t buf_put_cup(char *dst, uint16_t pos, uint16_t cap, uint8_t row1,
 
 static void frame_flush_if_needed(char *frame, uint16_t *pos, uint16_t cap)
 {
-    /* Keep >=112 B headroom so no single 97-byte ANSI line can ever truncate */
-    if (*pos >= (uint16_t)(cap - 112u))
+    /* Keep >=128 B headroom so no single ANSI line (max ~117 B) can ever truncate */
+    if (*pos >= (uint16_t)(cap - 128u))
     {
         uart_write_all(UART_A0, frame, *pos);
         *pos = 0u;
@@ -1486,6 +1966,10 @@ static uint8_t compute_cell_vis(uint8_t mx, uint8_t my)
             {
                 return 14u; /* Disguised as Chest ($) */
             }
+            if (enemy_freeze_turns(e) > 0u)
+            {
+                return 25u; /* Frozen enemy (FR cyan) */
+            }
             if (e->type == ENEMY_ARCHER && (e->flags & EF_AIMING) != 0u)
             {
                 return 22u; /* Telegraphed Archer (A!) */
@@ -1509,6 +1993,7 @@ static uint8_t compute_cell_vis(uint8_t mx, uint8_t my)
         case DNG_POTION:       return 13u;
         case DNG_MANA:         return 23u;
         case DNG_CHEST:        return 14u;
+        case DNG_SHOP:         return 24u;
         default:               return vis ? 15u : 16u;
     }
 }
@@ -1540,25 +2025,71 @@ static void vis_style(uint8_t vis, uint8_t *color_id, const char **ansi_seq, con
         case 21u: *color_id = 6u;  *ansi_seq = "\x1b[1;31m"; *glyph = "MM"; break; /* Awake Mimic */
         case 22u: *color_id = 9u;  *ansi_seq = "\x1b[1;37;41m"; *glyph = "A!"; break; /* Aiming Archer */
         case 23u: *color_id = 10u; *ansi_seq = "\x1b[1;34m"; *glyph = " *"; break; /* Mana crystal */
+        case 24u: *color_id = 1u;  *ansi_seq = "\x1b[1;32m"; *glyph = "$$"; break; /* Shop pedestal */
+        case 25u: *color_id = 11u; *ansi_seq = "\x1b[1;37;46m"; *glyph = "FR"; break; /* Frozen enemy */
         default:  *color_id = 0u;  *ansi_seq = "";           *glyph = "  "; break;
     }
+}
+
+static void render_top_banner(char *frame, uint16_t *pos, uint16_t cap)
+{
+    bool low = is_low_hp();
+    *pos = buf_put_cup(frame, *pos, cap, 1u, 1u);
+    if (low)
+    {
+        *pos = buf_puts(frame, *pos, cap, s_low_hp_pulse ? "\x1b[1;37;41m" : "\x1b[1;31;40m");
+        *pos = buf_puts(frame, *pos, cap, " [! LOW HP !]  FL:");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_floor);
+        *pos = buf_puts(frame, *pos, cap, "  HP:");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_hp);
+        *pos = buf_puts(frame, *pos, cap, "/");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_max_hp);
+        *pos = buf_puts(frame, *pos, cap, "  PRESS 1 FOR POTION OR RETREAT!                  \x1b[0m");
+    }
+    else
+    {
+        *pos = buf_puts(frame, *pos, cap, "\x1b[1;37;44m MSP430 DUNGEON  FL:");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_floor);
+        *pos = buf_puts(frame, *pos, cap, "  BEST:");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, (uint8_t)s_best_floor);
+        *pos = buf_puts(frame, *pos, cap, is_cave_floor(s_floor)
+            ? "  BIOME: FUNGAL CAVERNS                          \x1b[0m"
+            : "  BIOME: STONE CRYPT                             \x1b[0m");
+    }
+    frame_flush_if_needed(frame, pos, cap);
 }
 
 static void render_sidebar(char *frame, uint16_t *pos, uint16_t cap)
 {
     uint8_t i, listed = 0u;
+    bool low = is_low_hp();
 
-    /* Row 2: HP & MP */
+    /* Row 2: HP (flashes red when low!) & MP */
     *pos = buf_put_cup(frame, *pos, cap, 2u, 58u);
-    *pos = buf_puts(frame, *pos, cap, "\x1b[1;37mHP:\x1b[0m");
-    *pos = buf_put_u8_pad2(frame, *pos, cap, s_hp);
-    *pos = buf_puts(frame, *pos, cap, "/");
-    *pos = buf_put_u8_pad2(frame, *pos, cap, s_max_hp);
-    *pos = buf_puts(frame, *pos, cap, " \x1b[1;34mMP:\x1b[0m");
-    *pos = buf_put_u8_pad2(frame, *pos, cap, s_mana);
-    *pos = buf_puts(frame, *pos, cap, "/");
-    *pos = buf_put_u8_pad2(frame, *pos, cap, s_max_mana);
-    *pos = buf_puts(frame, *pos, cap, "  ");
+    if (low)
+    {
+        *pos = buf_puts(frame, *pos, cap, s_low_hp_pulse ? "\x1b[1;37;41m!HP:" : "\x1b[1;31m!HP:");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_hp);
+        *pos = buf_puts(frame, *pos, cap, "/");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_max_hp);
+        *pos = buf_puts(frame, *pos, cap, "\x1b[0m \x1b[1;34mMP:\x1b[0m");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_mana);
+        *pos = buf_puts(frame, *pos, cap, "/");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_max_mana);
+        *pos = buf_puts(frame, *pos, cap, " ");
+    }
+    else
+    {
+        *pos = buf_puts(frame, *pos, cap, "\x1b[1;37mHP:\x1b[0m");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_hp);
+        *pos = buf_puts(frame, *pos, cap, "/");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_max_hp);
+        *pos = buf_puts(frame, *pos, cap, " \x1b[1;34mMP:\x1b[0m");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_mana);
+        *pos = buf_puts(frame, *pos, cap, "/");
+        *pos = buf_put_u8_pad2(frame, *pos, cap, s_max_mana);
+        *pos = buf_puts(frame, *pos, cap, "  ");
+    }
     frame_flush_if_needed(frame, pos, cap);
 
     /* Row 3: ATK & DEF */
@@ -1591,12 +2122,13 @@ static void render_sidebar(char *frame, uint16_t *pos, uint16_t cap)
     /* Row 6-7: Divider + Nearby Foes header */
     *pos = buf_put_cup(frame, *pos, cap, 6u, 58u);
     *pos = buf_puts(frame, *pos, cap, "\x1b[90m---------------------\x1b[0m");
+    frame_flush_if_needed(frame, pos, cap);
     *pos = buf_put_cup(frame, *pos, cap, 7u, 58u);
     *pos = buf_puts(frame, *pos, cap, "\x1b[1;31mVISIBLE FOES:\x1b[0m        ");
     frame_flush_if_needed(frame, pos, cap);
 
-    /* Rows 8-11: Up to 4 visible enemies with live HP */
-    for (i = 0u; i < DNG_MAX_ENEMIES && listed < 4u; i++)
+    /* Rows 8-10: Up to 3 visible enemies with live HP / Freeze / Aim */
+    for (i = 0u; i < DNG_MAX_ENEMIES && listed < 3u; i++)
     {
         const dng_enemy_t *e = &s_enemies[i];
         if (e->type == ENEMY_NONE) { continue; }
@@ -1605,19 +2137,26 @@ static void render_sidebar(char *frame, uint16_t *pos, uint16_t cap)
 
         const dng_enemy_def_t *def = &k_enemy_defs[e->type];
         *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(8u + listed), 58u);
-        *pos = buf_puts(frame, *pos, cap, def->ansi);
-        *pos = buf_puts(frame, *pos, cap, (e->flags & EF_AIMING) ? "A!" : def->glyph);
-        *pos = buf_puts(frame, *pos, cap, "\x1b[0m ");
+        if (enemy_freeze_turns(e) > 0u)
+        {
+            *pos = buf_puts(frame, *pos, cap, "\x1b[1;36mFR\x1b[0m ");
+        }
+        else
+        {
+            *pos = buf_puts(frame, *pos, cap, def->ansi);
+            *pos = buf_puts(frame, *pos, cap, (e->flags & EF_AIMING) ? "A!" : def->glyph);
+            *pos = buf_puts(frame, *pos, cap, "\x1b[0m ");
+        }
         *pos = buf_puts(frame, *pos, cap, def->name);
         *pos = buf_puts(frame, *pos, cap, " ");
         *pos = buf_put_u8_dec(frame, *pos, cap, e->hp);
         *pos = buf_puts(frame, *pos, cap, "/");
         *pos = buf_put_u8_dec(frame, *pos, cap, e->max_hp);
-        *pos = buf_puts(frame, *pos, cap, "      ");
+        *pos = buf_puts(frame, *pos, cap, "\x1b[K");
         frame_flush_if_needed(frame, pos, cap);
         listed++;
     }
-    while (listed < 4u)
+    while (listed < 3u)
     {
         *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(8u + listed), 58u);
         *pos = buf_puts(frame, *pos, cap, (listed == 0u) ? "\x1b[90m(none in sight)      \x1b[0m"
@@ -1625,24 +2164,77 @@ static void render_sidebar(char *frame, uint16_t *pos, uint16_t cap)
         frame_flush_if_needed(frame, pos, cap);
         listed++;
     }
+
+    /* Rows 11-13: Divider + Consumable Belt */
+    *pos = buf_put_cup(frame, *pos, cap, 11u, 58u);
+    *pos = buf_puts(frame, *pos, cap, "\x1b[90m---------------------\x1b[0m");
+    frame_flush_if_needed(frame, pos, cap);
+
+    *pos = buf_put_cup(frame, *pos, cap, 12u, 58u);
+    *pos = buf_puts(frame, *pos, cap, "\x1b[1;36m[1]Pot:\x1b[0m");
+    *pos = buf_put_u8_dec(frame, *pos, cap, s_potions);
+    *pos = buf_puts(frame, *pos, cap, " \x1b[1;31m[2]Bmb:\x1b[0m");
+    *pos = buf_put_u8_dec(frame, *pos, cap, s_bombs);
+    *pos = buf_puts(frame, *pos, cap, "   ");
+    frame_flush_if_needed(frame, pos, cap);
+
+    *pos = buf_put_cup(frame, *pos, cap, 13u, 58u);
+    *pos = buf_puts(frame, *pos, cap, "\x1b[1;33m[3]Map:\x1b[0m");
+    *pos = buf_put_u8_dec(frame, *pos, cap, s_scrolls);
+    *pos = buf_puts(frame, *pos, cap, "             ");
+    frame_flush_if_needed(frame, pos, cap);
 }
 
 static void render_sidebar_static_legend(char *frame, uint16_t *pos, uint16_t cap)
 {
-    static const char *const k_leg[7] = {
+    static const char *const k_leg[5] = {
         "\x1b[90m---------------------\x1b[0m",
-        "\x1b[33m++\x1b[0mDoor  \x1b[33m%%\x1b[0mCrack(F)",
-        "\x1b[1;31m ^\x1b[0mTrap  \x1b[1;35m &\x1b[0mShrine",
-        "\x1b[1;36m +\x1b[0mPot   \x1b[1;34m *\x1b[0mMana",
-        "\x1b[1;33m $\x1b[0mChest \x1b[1;33m >\x1b[0mStairs",
-        "\x1b[1;31msl\x1b[0m/\x1b[1;35mSK\x1b[0m/\x1b[1;33mAR\x1b[0m/\x1b[1;36mWR\x1b[0m/\x1b[1;31mMM\x1b[0m Foes",
-        "\x1b[90mM:FullMap C:Center\x1b[0m"
+        "\x1b[1;34mF\x1b[0m:Bolt(1) \x1b[1;36mQ\x1b[0m:Nova(2)",
+        "\x1b[1;35mE\x1b[0m:Blink(2) \x1b[1;32mSpc\x1b[0m:Med",
+        "\x1b[1;32m$$\x1b[0mShop \x1b[1;35m &\x1b[0mShrine \x1b[1;33m>\x1b[0mSt",
+        "\x1b[90mM:Map  C:Ctr  ?:Help\x1b[0m"
     };
     uint8_t i;
-    for (i = 0u; i < 7u; i++)
+    for (i = 0u; i < 5u; i++)
     {
-        *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(12u + i), 58u);
+        *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(14u + i), 58u);
         *pos = buf_puts(frame, *pos, cap, k_leg[i]);
+        frame_flush_if_needed(frame, pos, cap);
+    }
+}
+
+static void render_help_overlay(char *frame, uint16_t *pos, uint16_t cap)
+{
+    static const char *const k_help[18] = {
+        " \x1b[1;33mCONTROLS:\x1b[0m",
+        "   WASD / Arrows : Move, Melee Attack, Open Door, Buy Shop (bump x2)",
+        "   Space         : Meditate (+1 MP & Empower next strike +50% dmg)",
+        "   F (1 MP)      : Arcane Bolt (line dmg + shatters %% Cracked Walls)",
+        "   Q (2 MP)      : Frost Nova (3x3 AoE dmg + freezes foes 2 turns)",
+        "   E (2 MP)      : Blink (teleport up to 3 tiles in facing direction)",
+        "   1 / 2 / 3     : Drink Potion (+6 HP) / Bomb (3x3) / Mapping Scroll",
+        "   M / C / ?     : Full 48x22 Map / Re-center Camera / This Help",
+        "   P / R / X     : FRAM Save / Restore / Erase  (Ctrl+L: Redraw)",
+        " ",
+        " \x1b[1;33mMAP LEGEND:\x1b[0m",
+        "   \x1b[1;32m^^ >> vv <<\x1b[0m You    \x1b[33m++\x1b[0m Door   \x1b[33m%%\x1b[0m Cracked Wall   \x1b[1;31m^\x1b[0m Spike Trap (2 dmg)",
+        "   \x1b[1;35m&\x1b[0m Shrine (Odd: -3HP/+1ATK, Even: Full HP/+1DEF)  \x1b[1;32m$$\x1b[0m Shop (Even Fl)",
+        "   \x1b[1;36m+\x1b[0m Potion   \x1b[1;34m*\x1b[0m Mana   \x1b[1;33m$\x1b[0m Chest   \x1b[1;33m>\x1b[0m Stairs (Auto-saves to FRAM)",
+        " ",
+        " \x1b[1;33mENEMIES:\x1b[0m",
+        "   \x1b[1;31msl\x1b[0m Slime(slow)  \x1b[1;35mSK\x1b[0m Skeleton  \x1b[1;33mAR\x1b[0m/\x1b[1;37;41mA!\x1b[0m Archer(telegraphs!)",
+        "   \x1b[1;36mWR\x1b[0m Wraith(phases walls, -1 MP)   \x1b[1;31mMM\x1b[0m Mimic(disguised as $ Chest!)"
+    };
+    uint8_t i;
+
+    *pos = buf_puts(frame, *pos, cap,
+        "\x1b[2J\x1b[H\x1b[?25l\x1b[1;37;44m MSP430 DUNGEON HELP & LEGEND              PRESS ? OR ANY KEY TO CLOSE          \x1b[0m");
+    frame_flush_if_needed(frame, pos, cap);
+
+    for (i = 0u; i < 18u; i++)
+    {
+        *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(i + 3u), 1u);
+        *pos = buf_puts(frame, *pos, cap, k_help[i]);
         frame_flush_if_needed(frame, pos, cap);
     }
 }
@@ -1705,6 +2297,7 @@ static void render_full_map_overlay(char *frame, uint16_t *pos, uint16_t cap)
                         case DNG_POTION:       cid = 7u; ansi = "\x1b[1;36m"; ch = '+'; break;
                         case DNG_MANA:         cid = 8u; ansi = "\x1b[1;34m"; ch = '*'; break;
                         case DNG_CHEST:        cid = 4u; ansi = "\x1b[1;33m"; ch = '$'; break;
+                        case DNG_SHOP:         cid = 1u; ansi = "\x1b[1;32m"; ch = '$'; break;
                         default:               cid = 3u; ansi = "\x1b[90m";   ch = '.'; break;
                     }
                 }
@@ -1743,6 +2336,13 @@ static void render_if_dirty(void)
     }
     s_dirty = false;
 
+    if (s_help_mode)
+    {
+        render_help_overlay(frame, &pos, cap);
+        if (pos > 0u) { uart_write_all(UART_A0, frame, pos); }
+        return;
+    }
+
     if (s_map_mode)
     {
         render_full_map_overlay(frame, &pos, cap);
@@ -1754,15 +2354,9 @@ static void render_if_dirty(void)
     {
         s_full_redraw = false;
 
-        /* Row 1: Top banner (80 cols) */
-        pos = buf_puts(frame, pos, cap, "\x1b[2J\x1b[H\x1b[?25l\x1b[1;37;44m MSP430 DUNGEON  FL:");
-        pos = buf_put_u8_pad2(frame, pos, cap, s_floor);
-        pos = buf_puts(frame, pos, cap, "  BEST:");
-        pos = buf_put_u8_pad2(frame, pos, cap, (uint8_t)s_best_floor);
-        pos = buf_puts(frame, pos, cap, is_cave_floor(s_floor)
-            ? "  BIOME: FUNGAL CAVERNS                          \x1b[0m"
-            : "  BIOME: STONE CRYPT                             \x1b[0m");
-        frame_flush_if_needed(frame, &pos, cap);
+        /* Clear screen & draw Row 1 Top banner (80 cols) */
+        pos = buf_puts(frame, pos, cap, "\x1b[2J\x1b[H\x1b[?25l");
+        render_top_banner(frame, &pos, cap);
 
         /* Rows 2..18: 28x17 viewport + col 57 vertical divider */
         for (vr = 0u; vr < DNG_VIEW_H; vr++)
@@ -1808,7 +2402,7 @@ static void render_if_dirty(void)
 
         pos = buf_put_cup(frame, pos, cap, 21u, 1u);
         pos = buf_puts(frame, pos, cap,
-            "\x1b[90mWASD/ARROWS:MOVE  F:BOLT  SPACE:MEDITATE(+EMP)  M:MAP  C:CENTER  P/R:SAVE/LOAD\x1b[0m");
+            "\x1b[90mWASD:MOVE  F:BOLT Q:NOVA E:BLINK  1-3:BELT  SPACE:MED  M:MAP ?:HELP  P/R:SAVE\x1b[0m");
     }
     else
     {
@@ -1818,6 +2412,10 @@ static void render_if_dirty(void)
         uint8_t cur_c = 255u;
 
         pos = buf_puts(frame, pos, cap, "\x1b[?25l");
+        if (is_low_hp())
+        {
+            render_top_banner(frame, &pos, cap);
+        }
         for (vr = 0u; vr < DNG_VIEW_H; vr++)
         {
             for (vc = 0u; vc < DNG_VIEW_W; vc++)
@@ -1901,6 +2499,25 @@ static void handle_command(uint8_t cmd)
         return;
     }
 
+    /* Toggle Help overlay */
+    if (cmd == '?' || cmd == 'h' || cmd == 'H')
+    {
+        s_help_mode = !s_help_mode;
+        s_map_mode  = false;
+        s_full_redraw = true;
+        s_dirty = true;
+        return;
+    }
+
+    /* Any other command exits Help overlay first */
+    if (s_help_mode)
+    {
+        s_help_mode = false;
+        s_full_redraw = true;
+        s_dirty = true;
+        return;
+    }
+
     /* Toggle 1:1 full-floor map overlay */
     if (cmd == 'm' || cmd == 'M')
     {
@@ -1971,8 +2588,6 @@ static void handle_command(uint8_t cmd)
         switch (cmd)
         {
             case CMD_ROTATE:
-            case 'e':
-            case 'E':
                 s_dir = (uint8_t)((s_dir + 1u) & 0x03u);
                 s_dirty = true;
                 break;
@@ -1998,6 +2613,23 @@ static void handle_command(uint8_t cmd)
             case 'f':
             case 'F':
                 cast_arcane_bolt();
+                break;
+            case 'q':
+            case 'Q':
+                cast_frost_nova();
+                break;
+            case 'e':
+            case 'E':
+                cast_blink();
+                break;
+            case '1':
+                use_potion();
+                break;
+            case '2':
+                use_bomb();
+                break;
+            case '3':
+                use_scroll_mapping();
                 break;
             case ' ':
                 if (s_mana < s_max_mana)
@@ -2073,16 +2705,52 @@ void dungeon_game_process(void)
 
     if (do_probe)
     {
-        if (s_missed_probes < 3u)
+        bool was_dirty = s_dirty;
+
+        /* Low-HP heartbeat: blink Red LED1 + pulse red banner every 500 ms, beep BEL every 2.0 s */
+        if (is_low_hp())
         {
-            s_missed_probes++;
+            s_was_low_hp = true;
+            s_low_hp_pulse = !s_low_hp_pulse;
+            board_led1(s_low_hp_pulse);
+            if (s_terminal_connected && !s_map_mode && !s_help_mode)
+            {
+                s_dirty = true;
+            }
+            s_low_hp_beep_ticks++;
+            if (s_low_hp_beep_ticks >= 4u)
+            {
+                s_low_hp_beep_ticks = 0u;
+                if (s_terminal_connected)
+                {
+                    static const char bel = '\x07';
+                    (void)uart_write(UART_A0, &bel, 1u);
+                }
+            }
         }
-        if (s_missed_probes >= 2u)
+        else if (!s_game_over)
         {
-            s_terminal_connected = false;
+            if (s_low_hp_pulse || s_was_low_hp)
+            {
+                s_low_hp_pulse = false;
+                s_was_low_hp   = false;
+                board_led1(false);
+                s_full_redraw = true;
+                s_dirty = true;
+            }
+            s_low_hp_beep_ticks = 0u;
         }
-        if (!s_dirty && uart_tx_idle(UART_A0))
+
+        if (!was_dirty && uart_tx_idle(UART_A0))
         {
+            if (s_missed_probes < 3u)
+            {
+                s_missed_probes++;
+            }
+            if (s_missed_probes >= 2u)
+            {
+                s_terminal_connected = false;
+            }
             static const char dsr_query[4] = "\x1b[5n";
             (void)uart_write(UART_A0, dsr_query, 4u);
         }
