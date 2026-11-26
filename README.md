@@ -30,11 +30,29 @@ mspgame/
 └── README.md
 ```
 
+## Instant UART Terminal Launch
+
+Auto-detects the LaunchPad's **MSP Application UART1** COM port and opens a zero-config ANSI/VT100 terminal:
+
+- **One-click / default (`9600` baud, PuTTY window)**: double-click [play.bat](play.bat) or run:
+  ```bat
+  .\play.bat
+  ```
+- **For `115200` baud games (`space_game`)**:
+  ```bat
+  .\play.bat 115200
+  ```
+- **Inline inside your current terminal (no PuTTY required, press `Ctrl+]` to exit)**:
+  ```bat
+  .\play.bat inline
+  .\play.bat 115200 inline
+  ```
+
+You can also invoke [tools/launch_terminal.ps1](tools/launch_terminal.ps1) directly with `-Baud`, `-Mode` (`auto`, `putty`, `inline`), or `-Port COMx`.
+
 ## Quick Start
 
 1. Open **TI Code Composer Studio** in `C:\Users\joaog\workspace_v12` with the `mspgame` project.
 2. Connect the **MSP-EXP430FR5994 LaunchPad** via USB (ensure the eZ-FET `TXD`/`RXD` jumpers are installed).
 3. Build and flash `mspgame`.
-4. Open any ANSI/VT100-capable serial terminal (PuTTY, Tera Term, `screen`, `picocom`, or CCS Terminal) on the **MSP Application UART1** COM port:
-   - `dungeon_game` (`main.c`): **`9600` baud**, `8N1`, flow control `None`, local echo `Off`
-   - `space_game` (`main.c.space_game`): **`115200` baud**, `8N1`, flow control `None`, local echo `Off`
+4. Run `.\play.bat` (or `.\play.bat 115200` for `space_game`). If using another serial terminal manually on **MSP Application UART1**, set `8N1`, flow control `None`, and local echo `Off`.
