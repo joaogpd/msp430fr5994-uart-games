@@ -1,0 +1,11 @@
+{
+  "game-manual-sync": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\check_manual_sync.ps1",
+        "timeout": 15
+      }
+    ]
+  }
+}
