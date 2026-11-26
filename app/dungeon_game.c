@@ -1,4 +1,5 @@
 #include "app/dungeon_game.h"
+#include "app/ga_weights.h"
 #include "drivers/msp430/uart.h"
 #include "drivers/msp430/ckpt.h"
 #include "drivers/msp430/timer.h"
@@ -175,6 +176,11 @@ static bool          s_map_mode;
 static bool          s_help_mode;
 static bool          s_hof_mode;
 static bool          s_class_select;
+static bool          s_ai_demo;
+static uint8_t       s_ai_model;     /* 0=Heuristic A (22B), 1=Tiny-MLP B (587B) */
+static uint8_t       s_ai_hx[16];
+static uint8_t       s_ai_hy[16];
+static uint8_t       s_ai_hidx;
 static uint8_t       s_class;
 static uint8_t       s_relics;
 static uint16_t      s_run_seed;
@@ -1081,6 +1087,7 @@ static void start_new_run_with_class(uint8_t cls)
 static void start_new_run(void)
 {
     s_class_select = true;
+    s_ai_demo      = false;
     s_game_over    = false;
     s_map_mode     = false;
     s_help_mode    = false;
@@ -1089,6 +1096,17 @@ static void start_new_run(void)
     board_led2(false);
     s_full_redraw  = true;
     s_dirty        = true;
+}
+
+static void start_ai_demo(void)
+{
+    start_new_run_with_class(CLASS_KNIGHT);
+    s_ai_demo  = true;
+    s_ai_model = 0u;
+    s_ai_hidx  = 0u;
+    memset(s_ai_hx, 0xFF, sizeof(s_ai_hx));
+    memset(s_ai_hy, 0xFF, sizeof(s_ai_hy));
+    set_status("AI DEMO (FRAM Q7 HEURISTIC) ACTIVE! T:SWITCH HEUR/MLP  N:EXIT");
 }
 
 void dungeon_game_init(void)
@@ -1106,6 +1124,8 @@ void dungeon_game_init(void)
     s_help_mode          = false;
     s_hof_mode           = false;
     s_class_select       = false;
+    s_ai_demo            = false;
+    s_ai_model           = 0u;
     s_was_low_hp         = false;
     s_low_hp_pulse       = false;
     s_low_hp_beep_ticks  = 0u;
@@ -1297,13 +1317,20 @@ static void damage_player(uint8_t raw_dmg, const char *source_name)
         s_was_low_hp = false;
         s_low_hp_pulse = false;
         board_led1(true);
-        record_hall_of_fame();
-        /* Never overwrite an active FRAM save with dead (0 HP) state */
-        if (!s_has_saved_run)
+        if (!s_ai_demo)
         {
-            (void)commit_checkpoint(false);
+            record_hall_of_fame();
+            /* Never overwrite an active FRAM save with dead (0 HP) state */
+            if (!s_has_saved_run)
+            {
+                (void)commit_checkpoint(false);
+            }
+            set_status("YOU DIED! W/SPACE:NEW RUN  R:LOAD FRAM  H:HALL OF FAME");
         }
-        set_status("YOU DIED! W/SPACE:NEW RUN  R:LOAD FRAM  H:HALL OF FAME");
+        else
+        {
+            set_status("AI DEMO ENDED! PRESS 4/W FOR NEW DEMO, N FOR CLASS SELECT.");
+        }
         s_full_redraw = true;
     }
 }
@@ -2152,7 +2179,7 @@ static void step_in_direction(uint8_t dir)
     else if (target == DNG_STAIRS)
     {
         s_floor++;
-        if ((uint16_t)s_floor > s_best_floor)
+        if (!s_ai_demo && (uint16_t)s_floor > s_best_floor)
         {
             s_best_floor = (uint16_t)s_floor;
         }
@@ -2161,7 +2188,10 @@ static void step_in_direction(uint8_t dir)
             s_mana++;
         }
         generate_floor();
-        (void)commit_checkpoint(true);
+        if (!s_ai_demo)
+        {
+            (void)commit_checkpoint(true);
+        }
         if (is_boss_floor(s_floor))
         {
             set_status("ENTERED THE BOSS SANCTUM! PREPARE TO FACE THE BONE WARDEN!");
@@ -2402,7 +2432,16 @@ static void render_top_banner(char *frame, uint16_t *pos, uint16_t cap)
     }
     else
     {
-        *pos = buf_puts(frame, *pos, cap, "\x1b[1;37;44m MSP430 DUNGEON FL:");
+        if (s_ai_demo)
+        {
+            *pos = buf_puts(frame, *pos, cap, (s_ai_model == 0u)
+                ? "\x1b[1;37;45m AI:HEURISTIC   FL:"
+                : "\x1b[1;37;45m AI:TINY-MLP    FL:");
+        }
+        else
+        {
+            *pos = buf_puts(frame, *pos, cap, "\x1b[1;37;44m MSP430 DUNGEON FL:");
+        }
         *pos = buf_put_u8_pad2(frame, *pos, cap, s_floor);
         *pos = buf_puts(frame, *pos, cap, " BEST:");
         *pos = buf_put_u8_pad2(frame, *pos, cap, (uint8_t)s_best_floor);
@@ -2608,7 +2647,7 @@ static void render_sidebar_static_legend(char *frame, uint16_t *pos, uint16_t ca
 
 static void render_class_select_overlay(char *frame, uint16_t *pos, uint16_t cap)
 {
-    static const char *const k_cls[14] = {
+    static const char *const k_cls[16] = {
         " \x1b[1;33mCHOOSE YOUR HERO CLASS:\x1b[0m",
         " ",
         "   \x1b[1;32m[1] KNIGHT   (KNT)\x1b[0m  HP:16  MP:4  ATK:3  DEF:1  Belt: 1 Pot",
@@ -2620,9 +2659,11 @@ static void render_class_select_overlay(char *frame, uint16_t *pos, uint16_t cap
         "   \x1b[1;35m[3] ROGUE    (ROG)\x1b[0m  HP:12  MP:5  ATK:2  DEF:0  Belt: 1 Pot/Bmb/Map +25G",
         "       +1 vision radius, spots traps at range 4, +2 CRIT on first strike!",
         " ",
+        "   \x1b[1;33m[4] AI DEMO  (FRAM)\x1b[0m Watch on-chip quantized Q7 GA play autonomously!",
+        "       Press \x1b[1;37mT\x1b[0m during demo to switch Heuristic (22B) vs Tiny-MLP (587B).",
+        " ",
         " \x1b[90m----------------------------------------------------------------------------\x1b[0m",
-        "   Press \x1b[1;37m1 / 2 / 3\x1b[0m to start  |  \x1b[1;37mR\x1b[0m: Load FRAM Save  |  \x1b[1;37mH\x1b[0m: Hall of Fame",
-        "   (LaunchPad S2 starts Knight immediately)"
+        "   Press \x1b[1;37m1 / 2 / 3 / 4\x1b[0m  |  \x1b[1;37mR\x1b[0m: Load FRAM Save  |  \x1b[1;37mH\x1b[0m: Hall of Fame"
     };
     uint8_t i;
 
@@ -2630,7 +2671,7 @@ static void render_class_select_overlay(char *frame, uint16_t *pos, uint16_t cap
         "\x1b[2J\x1b[H\x1b[?25l\x1b[1;37;44m MSP430FR5994 DUNGEON CRAWLER                         NEW ADVENTURE             \x1b[0m");
     frame_flush_if_needed(frame, pos, cap);
 
-    for (i = 0u; i < 14u; i++)
+    for (i = 0u; i < 16u; i++)
     {
         *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(i + 3u), 1u);
         *pos = buf_puts(frame, *pos, cap, k_cls[i]);
@@ -2956,6 +2997,284 @@ static void render_if_dirty(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Stage 4: On-Chip Zero-Float Q7 FRAM AI Engine (Heuristic A + Tiny-MLP B)
+ * -------------------------------------------------------------------------- */
+
+static uint8_t ai_recent_visits(uint8_t x, uint8_t y)
+{
+    uint8_t i, cnt = 0u;
+    for (i = 0u; i < 16u; i++)
+    {
+        if (s_ai_hx[i] == x && s_ai_hy[i] == y) { cnt++; }
+    }
+    return cnt;
+}
+
+static bool ai_can_afford_shop(uint8_t x, uint8_t y)
+{
+    int8_t si = find_shop_at(x, y);
+    if (si < 0) { return false; }
+    const dng_shop_slot_t *sh = &s_shop[si];
+    if (s_gold < (uint16_t)sh->cost) { return false; }
+    if ((sh->kind == SHOP_POT && s_potions >= 9u) ||
+        (sh->kind == SHOP_BOMB && s_bombs >= 9u) ||
+        (sh->kind == SHOP_MAP && s_scrolls >= 9u))
+    {
+        return false;
+    }
+    return true;
+}
+
+static uint8_t ai_ray_enemy(uint8_t d, uint8_t max_dist, bool incl_cracked)
+{
+    int8_t x = (int8_t)s_px;
+    int8_t y = (int8_t)s_py;
+    uint8_t step;
+    for (step = 1u; step <= max_dist; step++)
+    {
+        x = (int8_t)(x + DIR_DX[d]);
+        y = (int8_t)(y + DIR_DY[d]);
+        if (x <= 0 || x >= (int8_t)(DNG_W - 1u) || y <= 0 || y >= (int8_t)(DNG_H - 1u)) { break; }
+        if ((s_map[y][x] & TILE_F_VISIBLE) != 0u)
+        {
+            int8_t ei = find_enemy_at((uint8_t)x, (uint8_t)y);
+            if (ei >= 0 && !(s_enemies[ei].type == ENEMY_MIMIC && (s_enemies[ei].flags & EF_AWAKE) == 0u))
+            {
+                return step;
+            }
+        }
+        uint8_t t = tile_type((uint8_t)x, (uint8_t)y);
+        if (incl_cracked && t == DNG_CRACKED_WALL) { return step; }
+        if (tile_blocks_los(t)) { break; }
+    }
+    return 0u;
+}
+
+static int8_t ai_clamp_q7(int16_t v)
+{
+    if (v > 127)  { return 127; }
+    if (v < -127) { return -127; }
+    return (int8_t)v;
+}
+
+static uint8_t ga_select_action_q7(void)
+{
+    static const uint8_t k_act[GA_NUM_ACTIONS] = { 'w','d','s','a','f','q','e','1','2','3',' ' };
+    bool valid[GA_NUM_ACTIONS];
+    uint8_t r, c, d, i, a;
+
+    /* Record current pos into 16-entry anti-oscillation history */
+    s_ai_hx[s_ai_hidx] = s_px;
+    s_ai_hy[s_ai_hidx] = s_py;
+    s_ai_hidx = (uint8_t)((s_ai_hidx + 1u) & 0x0Fu);
+
+    /* Single-pass Fair Fog-of-War scan for nearest stairs, loot, frontier, visible foe */
+    uint8_t st_x = 255u, st_y = 255u, st_d = 255u;
+    uint8_t lt_x = 255u, lt_y = 255u, lt_d = 255u;
+    uint8_t fr_x = 255u, fr_y = 255u, fr_d = 255u;
+    uint8_t en_x = 255u, en_y = 255u, en_d = 255u;
+    uint8_t adj3 = 0u;
+
+    for (r = 1u; r < (DNG_H - 1u); r++)
+    {
+        for (c = 1u; c < (DNG_W - 1u); c++)
+        {
+            uint8_t cell = s_map[r][c];
+            if ((cell & TILE_F_EXPLORED) == 0u) { continue; }
+            uint8_t t = (uint8_t)(cell & TILE_TYPE_MASK);
+            uint8_t md = (uint8_t)(u8_abs_diff(c, s_px) + u8_abs_diff(r, s_py));
+
+            if (t == DNG_STAIRS && md < st_d)
+            {
+                st_x = c; st_y = r; st_d = md;
+            }
+            if ((t == DNG_POTION || t == DNG_MANA || t == DNG_CHEST || t == DNG_RELIC ||
+                 (t == DNG_SHRINE && (cell & TILE_F_REVEALED) == 0u) ||
+                 (t == DNG_SHOP && ai_can_afford_shop(c, r))) && md > 0u && md < lt_d)
+            {
+                lt_x = c; lt_y = r; lt_d = md;
+            }
+            if (t != DNG_WALL && t != DNG_CRACKED_WALL && md > 0u && md < fr_d)
+            {
+                if (((s_map[r - 1u][c] & TILE_F_EXPLORED) == 0u) ||
+                    ((s_map[r + 1u][c] & TILE_F_EXPLORED) == 0u) ||
+                    ((s_map[r][c - 1u] & TILE_F_EXPLORED) == 0u) ||
+                    ((s_map[r][c + 1u] & TILE_F_EXPLORED) == 0u))
+                {
+                    fr_x = c; fr_y = r; fr_d = md;
+                }
+            }
+        }
+    }
+
+    for (i = 0u; i < DNG_MAX_ENEMIES; i++)
+    {
+        const dng_enemy_t *e = &s_enemies[i];
+        if (e->type == ENEMY_NONE) { continue; }
+        if (e->type == ENEMY_MIMIC && (e->flags & EF_AWAKE) == 0u) { continue; }
+        if ((s_map[e->y][e->x] & TILE_F_VISIBLE) == 0u) { continue; }
+        uint8_t md = (uint8_t)(u8_abs_diff(e->x, s_px) + u8_abs_diff(e->y, s_py));
+        if (md < en_d) { en_x = e->x; en_y = e->y; en_d = md; }
+        if (u8_abs_diff(e->x, s_px) <= 1u && u8_abs_diff(e->y, s_py) <= 1u) { adj3++; }
+    }
+
+    /* Valid action mask (zero wall bumps) */
+    for (d = 0u; d < 4u; d++)
+    {
+        int8_t nx = (int8_t)((int8_t)s_px + DIR_DX[d]);
+        int8_t ny = (int8_t)((int8_t)s_py + DIR_DY[d]);
+        valid[d] = false;
+        if (nx > 0 && nx < (int8_t)(DNG_W - 1u) && ny > 0 && ny < (int8_t)(DNG_H - 1u))
+        {
+            uint8_t t = tile_type((uint8_t)nx, (uint8_t)ny);
+            if (t == DNG_SHOP) { valid[d] = ai_can_afford_shop((uint8_t)nx, (uint8_t)ny); }
+            else if (t != DNG_WALL && t != DNG_CRACKED_WALL) { valid[d] = true; }
+        }
+    }
+    valid[4]  = (s_mana >= 1u);
+    valid[5]  = (s_mana >= 2u);
+    valid[6]  = (s_mana >= 2u);
+    valid[7]  = (s_potions > 0u && s_hp < s_max_hp);
+    valid[8]  = (s_bombs > 0u);
+    valid[9]  = (s_scrolls > 0u);
+    valid[10] = true; /* Space: meditate */
+
+    uint8_t best_a = 10u;
+    int32_t best_score = -2147483647L;
+
+    if (s_ai_model == 0u)
+    {
+        /* Approach A: Evolved 22-weight Q7 Tactical Heuristic */
+        for (a = 0u; a < GA_NUM_ACTIONS; a++)
+        {
+            if (!valid[a]) { continue; }
+            int8_t f[GA_HEUR_NUM_FEATURES];
+            memset(f, 0, sizeof(f));
+
+            if (a < 4u)
+            {
+                uint8_t nx = (uint8_t)((int8_t)s_px + DIR_DX[a]);
+                uint8_t ny = (uint8_t)((int8_t)s_py + DIR_DY[a]);
+                uint8_t t  = tile_type(nx, ny);
+                int8_t  ei = find_enemy_at(nx, ny);
+                if (ei >= 0 && !(s_enemies[ei].type == ENEMY_MIMIC && (s_enemies[ei].flags & EF_AWAKE) == 0u))
+                {
+                    f[0] = 127;
+                    if (s_enemies[ei].hp <= s_atk) { f[1] = 127; }
+                }
+                if (t == DNG_STAIRS) { f[2] = 127; }
+                if (t == DNG_POTION || t == DNG_MANA || t == DNG_CHEST || t == DNG_RELIC ||
+                    (t == DNG_SHRINE && (s_map[ny][nx] & TILE_F_REVEALED) == 0u)) { f[3] = 127; }
+                if (t == DNG_SHOP && ai_can_afford_shop(nx, ny)) { f[4] = 127; }
+                if (t == DNG_DOOR_CLOSED) { f[5] = 127; }
+                if (t == DNG_TRAP && (s_map[ny][nx] & TILE_F_REVEALED) != 0u) { f[6] = 127; }
+
+                if (st_x != 255u)
+                {
+                    uint8_t nd = (uint8_t)(u8_abs_diff(nx, st_x) + u8_abs_diff(ny, st_y));
+                    f[7] = (nd < st_d) ? 127 : ((nd > st_d) ? -127 : 0);
+                }
+                if (lt_x != 255u)
+                {
+                    uint8_t nd = (uint8_t)(u8_abs_diff(nx, lt_x) + u8_abs_diff(ny, lt_y));
+                    f[8] = (nd < lt_d) ? 127 : ((nd > lt_d) ? -127 : 0);
+                }
+                if (fr_x != 255u)
+                {
+                    uint8_t nd = (uint8_t)(u8_abs_diff(nx, fr_x) + u8_abs_diff(ny, fr_y));
+                    f[9] = (nd < fr_d) ? 127 : ((nd > fr_d) ? -127 : 0);
+                }
+                if (en_x != 255u)
+                {
+                    uint8_t nd = (uint8_t)(u8_abs_diff(nx, en_x) + u8_abs_diff(ny, en_y));
+                    f[10] = (nd < en_d) ? 127 : ((nd > en_d) ? -127 : 0);
+                    if (is_low_hp() && nd > en_d) { f[21] = 127; }
+                }
+                uint8_t vcnt = ai_recent_visits(nx, ny);
+                f[11] = ai_clamp_q7((int16_t)(127 - (int16_t)vcnt * 64));
+                if (ai_ray_enemy(a, 6u, true) > 0u) { f[13] = 127; }
+            }
+            else if (a == 4u) { f[14] = (ai_ray_enemy(s_dir, 8u, true) > 0u) ? 127 : -64; }
+            else if (a == 5u) { f[15] = ai_clamp_q7((int16_t)adj3 * 42); }
+            else if (a == 6u) { f[16] = (is_low_hp() && adj3 > 0u) ? 127 : -32; }
+            else if (a == 7u) { f[17] = ai_clamp_q7((int16_t)(((int16_t)(s_max_hp - s_hp) * 127) / (int16_t)(s_max_hp ? s_max_hp : 1u))); }
+            else if (a == 8u) { f[18] = (adj3 >= 2u) ? 127 : -64; }
+            else if (a == 9u) { f[19] = (st_x == 255u) ? 127 : -64; }
+            else              { f[20] = (s_mana < s_max_mana && adj3 == 0u) ? 64 : -64; }
+
+            int32_t sc = 0;
+            for (i = 0u; i < GA_HEUR_NUM_FEATURES; i++)
+            {
+                sc += (int32_t)f[i] * (int32_t)GA_HEUR_WEIGHTS[i];
+            }
+            if (sc > best_score) { best_score = sc; best_a = a; }
+        }
+    }
+    else
+    {
+        /* Approach B: Evolved 24 -> 16 -> 11 ReLU Q7 Tiny-MLP */
+        int8_t x[GA_MLP_IN];
+        int8_t h[GA_MLP_HIDDEN];
+        memset(x, 0, sizeof(x));
+
+        x[0] = ai_clamp_q7((int16_t)(((int16_t)s_hp * 254) / (int16_t)(s_max_hp ? s_max_hp : 1u) - 127));
+        x[1] = ai_clamp_q7((int16_t)(((int16_t)s_mana * 254) / (int16_t)(s_max_mana ? s_max_mana : 1u) - 127));
+        x[2] = s_empowered ? 127 : -127;
+        x[3] = (s_potions > 0u) ? 127 : -127;
+        x[4] = (s_bombs > 0u || s_scrolls > 0u) ? 127 : -127;
+        x[5] = (ai_ray_enemy(s_dir, 8u, true) > 0u) ? 127 : -127;
+
+        for (d = 0u; d < 4u; d++)
+        {
+            int8_t nx = (int8_t)((int8_t)s_px + DIR_DX[d]);
+            int8_t ny = (int8_t)((int8_t)s_py + DIR_DY[d]);
+            if (nx <= 0 || nx >= (int8_t)(DNG_W - 1u) || ny <= 0 || ny >= (int8_t)(DNG_H - 1u)) { x[6u + d] = -127; }
+            else if (find_enemy_at((uint8_t)nx, (uint8_t)ny) >= 0) { x[6u + d] = 127; }
+            else if (tile_blocks_move(tile_type((uint8_t)nx, (uint8_t)ny))) { x[6u + d] = -127; }
+            else { x[6u + d] = 0; }
+            uint8_t rd = ai_ray_enemy(d, 6u, false);
+            x[10u + d] = (rd > 0u) ? ai_clamp_q7((int16_t)((7 - (int16_t)rd) * 21)) : 0;
+        }
+
+        if (st_x != 255u) { x[14] = (st_x > s_px) ? 127 : ((st_x < s_px) ? -127 : 0); x[15] = (st_y > s_py) ? 127 : ((st_y < s_py) ? -127 : 0); }
+        if (fr_x != 255u) { x[16] = (fr_x > s_px) ? 127 : ((fr_x < s_px) ? -127 : 0); x[17] = (fr_y > s_py) ? 127 : ((fr_y < s_py) ? -127 : 0); }
+        if (lt_x != 255u) { x[18] = (lt_x > s_px) ? 127 : ((lt_x < s_px) ? -127 : 0); x[19] = (lt_y > s_py) ? 127 : ((lt_y < s_py) ? -127 : 0); }
+        if (en_x != 255u) { x[20] = (en_x > s_px) ? 127 : ((en_x < s_px) ? -127 : 0); x[21] = (en_y > s_py) ? 127 : ((en_y < s_py) ? -127 : 0); }
+        x[22] = ai_clamp_q7((int16_t)adj3 * 32);
+        x[23] = (s_enemies[0].type == ENEMY_BOSS || is_low_hp()) ? 127 : -127;
+
+        for (i = 0u; i < GA_MLP_HIDDEN; i++)
+        {
+            int32_t acc = (int32_t)GA_MLP_B1[i] << 7;
+            uint8_t j;
+            for (j = 0u; j < GA_MLP_IN; j++)
+            {
+                acc += (int32_t)GA_MLP_W1[i][j] * (int32_t)x[j];
+            }
+            if (acc <= 0) { h[i] = 0; }
+            else
+            {
+                int32_t q = acc >> GA_MLP_H_SHIFT;
+                h[i] = (q > 127) ? 127 : (int8_t)q;
+            }
+        }
+
+        for (a = 0u; a < GA_MLP_OUT; a++)
+        {
+            if (!valid[a]) { continue; }
+            int32_t acc = (int32_t)GA_MLP_B2[a] << 7;
+            for (i = 0u; i < GA_MLP_HIDDEN; i++)
+            {
+                acc += (int32_t)GA_MLP_W2[a][i] * (int32_t)h[i];
+            }
+            if (acc > best_score) { best_score = acc; best_a = a; }
+        }
+    }
+
+    return k_act[best_a];
+}
+
+/* --------------------------------------------------------------------------
  * Input Queue & Main Turn Processor
  * -------------------------------------------------------------------------- */
 
@@ -3025,6 +3344,10 @@ static void handle_command(uint8_t cmd)
         {
             start_new_run_with_class(CLASS_ROGUE);
         }
+        else if (cmd == '4')
+        {
+            start_ai_demo();
+        }
         else if (cmd == 'r' || cmd == 'R')
         {
             if (!load_checkpoint(true))
@@ -3072,6 +3395,22 @@ static void handle_command(uint8_t cmd)
         if (cmd == ' ') { return; }
     }
 
+    /* AI Demo mode controls: T switches Heuristic/MLP, N exits to Class Select */
+    if (s_ai_demo && (cmd == 't' || cmd == 'T'))
+    {
+        s_ai_model ^= 1u;
+        set_status((s_ai_model == 0u) ? "SWITCHED ON-CHIP FRAM AI TO: HEURISTIC A (22B Q7)"
+                                      : "SWITCHED ON-CHIP FRAM AI TO: TINY-MLP B (587B Q7)");
+        s_full_redraw = true;
+        s_dirty = true;
+        return;
+    }
+    if (s_ai_demo && (cmd == 'n' || cmd == 'N'))
+    {
+        start_new_run();
+        return;
+    }
+
     if (cmd == 'c' || cmd == 'C')
     {
         update_camera(true);
@@ -3114,7 +3453,11 @@ static void handle_command(uint8_t cmd)
     }
     else if (s_game_over)
     {
-        if (cmd == 'w' || cmd == 'W' || cmd == ' ' || cmd == CMD_STEP_FWD)
+        if (s_ai_demo && (cmd == '4' || cmd == 'w' || cmd == 'W' || cmd == ' ' || cmd == CMD_STEP_FWD))
+        {
+            start_ai_demo();
+        }
+        else if (cmd == 'w' || cmd == 'W' || cmd == ' ' || cmd == CMD_STEP_FWD)
         {
             start_new_run();
         }
@@ -3242,6 +3585,13 @@ void dungeon_game_process(void)
     if (do_probe)
     {
         bool was_dirty = s_dirty;
+
+        /* Stage 4: Autonomous on-chip FRAM AI step every 500 ms when in [4] AI DEMO */
+        if (s_ai_demo && !s_game_over && !s_class_select && !s_map_mode && !s_help_mode && !s_hof_mode)
+        {
+            uint8_t ai_act = ga_select_action_q7();
+            handle_command(ai_act);
+        }
 
         /* Low-HP heartbeat: blink Red LED1 + pulse red banner every 500 ms, beep BEL every 2.0 s */
         if (!s_class_select && is_low_hp())

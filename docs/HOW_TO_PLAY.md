@@ -2,7 +2,7 @@
 
 ## Overview
 
-The active firmware in [`main.c`](../main.c) runs **Dungeon Crawler** (`app/dungeon_game`), a turn-based ANSI/VT100 roguelike on a procedural **48 × 22** tile dungeon (1,056 tiles) with a **28 × 17** scrolling viewport + right HUD sidebar (**80 × 24** layout). It features **3 playable classes**, **3 spells + 3-slot consumable belt**, **in-world dungeon shops**, **integer Bresenham line-of-sight**, **5 regular enemy archetypes + the Floor-5 Boss ("The Bone Warden") & Relics**, **Low-HP visual/LED/audio alerts**, **4-hex seeded runs**, and **power-loss-safe FRAM checkpoints & Top-5 Hall of Fame**.
+The active firmware in [`main.c`](../main.c) runs **Dungeon Crawler** (`app/dungeon_game`), a turn-based ANSI/VT100 roguelike on a procedural **48 × 22** tile dungeon (1,056 tiles) with a **28 × 17** scrolling viewport + right HUD sidebar (**80 × 24** layout). It features **3 playable classes + an autonomous on-chip FRAM AI Demo (`[4] AI DEMO`)**, **3 spells + 3-slot consumable belt**, **in-world dungeon shops**, **integer Bresenham line-of-sight**, **5 regular enemy archetypes + the Floor-5 Boss ("The Bone Warden") & Relics**, **Low-HP visual/LED/audio alerts**, **4-hex seeded runs**, and **power-loss-safe FRAM checkpoints & Top-5 Hall of Fame**.
 
 | Setting | Value |
 | :--- | :--- |
@@ -49,17 +49,20 @@ Letter keys are case-insensitive.
 
 | Key | Action |
 | :--- | :--- |
-| `W` or `Up Arrow` | Face North and move / melee-attack / open door / bump shop *(Class Select: start Knight; Game Over: open Class Select)* |
+| `W` or `Up Arrow` | Face North and move / melee-attack / open door / bump shop *(Class Select: start Knight; Game Over: open Class Select, or restart AI Demo if in AI Demo)* |
 | `S` or `Down Arrow` | Face South and move / melee-attack / open door / bump shop |
 | `A` or `Left Arrow` | Face West and move / melee-attack / open door / bump shop |
 | `D` or `Right Arrow` | Face East and move / melee-attack / open door / bump shop |
 | `F` | Cast **Arcane Bolt** (`-1 MP`, range 8, pierces up to 2 foes for Arcanist, shatters `%%` Cracked Walls, advances turn) |
 | `Q` | Cast **Frost Nova** (`-2 MP`, 3 × 3 AoE around player, freezes hit foes for 2 turns `FR` & cancels aiming, advances turn) |
 | `E` | Cast **Blink** (`-2 MP`, teleports up to 3 tiles in your facing direction past foes to the farthest open tile, advances turn) |
-| `Space` | **Meditate** 1 turn (`+1 MP` up to Max MP **and** empowers your next attack `[EMP]`; advances turn) *(Class Select: start Knight; Game Over: open Class Select; closes Map Overlay without spending a turn)* |
+| `Space` | **Meditate** 1 turn (`+1 MP` up to Max MP **and** empowers your next attack `[EMP]`; advances turn) *(Class Select: start Knight; Game Over: open Class Select, or restart AI Demo; closes Map Overlay without spending a turn)* |
 | `1` | Drink **Health Potion** from Belt (`+6 HP`, advances turn) *(Class Select: choose **Knight**)* |
 | `2` | Detonate **Dungeon Bomb** from Belt (3 × 3 blast for `ATK + 4` dmg & shatters inner stone/cracked walls, advances turn) *(Class Select: choose **Arcanist**)* |
 | `3` | Read **Scroll of Mapping** from Belt (reveals entire 48 × 22 floor & all traps; does **not** advance turn) *(Class Select: choose **Rogue**)* |
+| `4` | *(Class Select / AI Demo Game Over)* Start **`[4] AI DEMO (FRAM)`** autonomous on-chip Q7 GA mode |
+| `T` | *(AI Demo only)* Toggle live between **Heuristic A (`22 B` Q7)** and **Tiny-MLP B (`587 B` Q7)** on-chip FRAM models |
+| `N` | *(AI Demo only)* Exit **AI Demo** and return to **Class Select** |
 | `M` | Toggle **1:1 Full-Floor Map Overlay** (48 × 22 view of explored tiles; press `M`, `Space`, or any command to close) |
 | `C` | **Re-center camera** on the player without advancing a turn |
 | `H` | Toggle **FRAM Hall of Fame** (Top 5 runs; works during play, Class Select, and Game Over; press `H` or any key to close) |
@@ -92,7 +95,7 @@ Buttons are debounced in 20 ms steps (`TIMER_A0`, 0 Hz when idle); a **hold** re
 
 ### Screen Layout (80 × 24)
 
-- **Row 1 (Top Banner):** Displays `FL` (current floor), `BEST` (deepest floor reached), 4-hex `SEED`, and active `BIOME` (`STONE CRYPT`, `FUNGAL CAVERNS`, or `BOSS SANCTUM`). Switches to a **pulsing red `[! LOW HP !]` warning** when HP is critical.
+- **Row 1 (Top Banner):** Displays `MSP430 DUNGEON` (or magenta **`AI:HEURISTIC`** / **`AI:TINY-MLP`** during **`[4] AI DEMO`**), `FL` (current floor), `BEST` (deepest floor reached), 4-hex `SEED`, and active `BIOME` (`STONE CRYPT`, `FUNGAL CAVERNS`, or `BOSS SANCTUM`). Switches to a **pulsing red `[! LOW HP !]` warning** when HP is critical.
 - **Rows 2–18 (Left, 56 cols):** **28 × 17** scrolling dungeon viewport (2-character wide glyphs).
 - **Rows 2–18 (Right, 22 cols):** Live **HUD Sidebar**:
 
@@ -130,7 +133,7 @@ BOSS[########]24
 | `REL:` | Claimed permanent Boss Relics (`[VAMP]`, `[ARC]`, or `(none)`) |
 | `BOSS[########]24` | Live **Boss HP bar** on Row 18 while The Bone Warden is alive (otherwise shows `M:Map H:HoF ?:Help`) |
 
-- **Row 20 (Bright Yellow):** Combat, shop, item, relic, and FRAM status messages.
+- **Row 20 (Bright Yellow):** Combat, shop, item, relic, AI, and FRAM status messages. Quiet walking steps automatically clear old Row 20 messages after **2 steps**.
 - **Row 21 (Dark Gray):** Quick keybind reminder bar.
 
 ### Low-HP Visual, LED & Audio Alert
@@ -178,13 +181,25 @@ Each viewport tile is rendered as a 2-character wide ANSI glyph; the `M` Full-Fl
 
 ### Playable Classes & Seeded Runs
 
-Every new run opens the **Class Select** screen (`1`, `2`, `3`; or `W`/`Space`/`S2` to start Knight immediately) and mixes the free-running `TIMER_A1` counter into the PRNG to generate a **4-hex Run Seed** (`SEED:XXXX`).
+Every new run opens the **Class Select** screen (`1`, `2`, `3`, or `4` for **AI Demo**; `W`/`Space`/`S2` starts Knight immediately) and mixes the free-running `TIMER_A1` counter into the PRNG to generate a **4-hex Run Seed** (`SEED:XXXX`).
 
 | Key | Class | Code | HP | MP | ATK | DEF | Gold | Starting Belt | Passive Ability |
 | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :--- |
 | `1` | **Knight** | `KNT` | 16 | 4 | 3 | 1 | 0 | `1 Pot` | Highest starting HP, ATK, and armor DEF |
 | `2` | **Arcanist** | `ARC` | 11 | 8 | 2 | 0 | 0 | `1 Pot`, `1 Bmb` | **Arcane Bolt (`F`) pierces up to 2 enemies** in a line |
 | `3` | **Rogue** | `ROG` | 12 | 5 | 2 | 0 | 25 | `1 Pot`, `1 Bmb`, `1 Map` | **`+1` vision radius** (7), **spots traps at distance 4**, and **`+2` Crit dmg** on first melee strike vs. full-HP foes |
+| `4` | **AI Demo (FRAM)** | `KNT` | 16 | 4 | 3 | 1 | 0 | `1 Pot` | Autonomous on-chip Q7 GA agent stepping every **500 ms** (see below) |
+
+### On-Chip FRAM AI Demo (`[4] AI DEMO`)
+
+Selecting **`4`** on the Class Select screen launches an autonomous **Knight** run powered entirely by zero-float quantized **Q7 (`int8_t`)** Genetic Algorithm inference stored in MSP430 FRAM ([`app/ga_weights.h`](../app/ga_weights.h)) — with **zero PC script required**:
+
+- **Autonomous Cadence:** Executes one AI action every **500 ms** (`TIMER_A1`) while active and not paused by an overlay (`M`, `H`, `?`). Uses Fair Fog-of-War sensing (only explored tiles and visible enemies), a valid-action mask (no wall bumps), and a 16-entry anti-oscillation position history.
+- **Live Model Toggle (`T`):** Press **`T`** at any time during AI Demo to switch live between the two evolved on-chip FRAM models, shown in the magenta Row 1 banner:
+  - **`AI:HEURISTIC`** — **Heuristic A (`22 B` Q7):** 22-feature evolved tactical heuristic (`GA_HEUR_WEIGHTS`).
+  - **`AI:TINY-MLP`** — **Tiny-MLP B (`587 B` Q7):** `24 → 16 → 11` ReLU neural network (`GA_MLP_W1`/`B1`/`W2`/`B2`).
+- **Exit / Restart:** Press **`N`** at any time to exit AI Demo and return to **Class Select**. When an AI Demo run ends, press **`4`**, **`W`**, **`Up Arrow`**, **`Space`**, or **`S2`** to start another AI Demo, or **`N`** for Class Select.
+- **FRAM Hall of Fame & Save Protection:** AI Demo runs do **not** record into the human **FRAM Hall of Fame (`H`)** and do **not** overwrite human active FRAM saves on death.
 
 ### Procedural 48 × 22 Biomes & Floor Layout
 
@@ -290,7 +305,7 @@ In addition, the **Top-5 Hall of Fame (`H`)** is stored directly in non-volatile
 | **Auto-Save** | Descend stairs (`>`) | Automatically commits the new floor to FRAM |
 | **Manual Save** | `P` or Hold `S1 + S2` (~0.8 s) | Saves the exact mid-floor state to FRAM *(blocked while dead)* |
 | **Manual Load** | `R` or Hold `S1` on Game Over | Restores the last saved active FRAM checkpoint |
-| **Death Protection** | Player reaches `0 HP` | Preserves any existing active FRAM checkpoint and records Top-5 runs in Hall of Fame |
+| **Death Protection** | Player reaches `0 HP` | Preserves any existing active FRAM checkpoint and records Top-5 human runs in Hall of Fame *(AI Demo deaths are excluded)* |
 | **Auto-Resume** | Power cycle / `RESET` | Automatically resumes the saved FRAM run on boot |
 | **Fresh Boot** | Hold `S1` while resetting | Skips FRAM auto-resume and opens Class Select for Floor 1 |
 | **Erase Saves** | `X` | Wipes both FRAM checkpoint slots and resets `BEST` to current floor *(Hall of Fame is kept)* |
