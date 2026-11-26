@@ -1,6 +1,6 @@
 @echo off
 setlocal
-set "BAUD=9600"
+set "BAUD=115200"
 set "MODE=auto"
 
 for %%A in (%*) do (

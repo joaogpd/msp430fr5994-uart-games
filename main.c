@@ -6,6 +6,7 @@
 #include "drivers/board/board.h"
 #include "drivers/msp430/cs.h"
 #include "drivers/msp430/gpio.h"
+#include "drivers/msp430/timer.h"
 #include "drivers/msp430/uart.h"
 #include "app/dungeon_game.h"
 
@@ -38,11 +39,11 @@ int main(void)
     cs_config_t cs_cfg = CS_CONFIG_DEFAULT;
     (void)cs_init(&cs_cfg);
 
-    /* 3. Route P2.0/P2.1 to eUSCI_A0 (ACLK @ 9600 baud allows true ~1 uA LPM3) */
+    /* 3. Route P2.0/P2.1 to eUSCI_A0 (SMCLK @ 115200 baud for snappy ANSI frames) */
     board_uart_pins(true);
     uart_config_t uart_cfg = {
-        .baud    = 9600u,
-        .clk     = UART_CLK_ACLK,
+        .baud    = 115200u,
+        .clk     = UART_CLK_SMCLK,
         .tx_buf  = s_uart_tx_buf,
         .tx_size = (uint16_t)sizeof(s_uart_tx_buf),
         .rx_cb   = on_uart_rx
@@ -55,15 +56,24 @@ int main(void)
     gpio_interrupt_enable(BOARD_S1_PORT, BOARD_S1_PIN);
     gpio_interrupt_enable(BOARD_S2_PORT, BOARD_S2_PIN);
 
-    /* 5. Initialize dungeon state & render initial frame */
+    /* 5. Initialize dungeon state & start 500 ms terminal-connect probe timer */
     dungeon_game_init();
+    (void)timer_start_periodic_ms(TIMER_A1, 500u, dungeon_game_on_probe_timer);
     __bis_SR_register(GIE);
 
     while (1)
     {
         dungeon_game_process();
 
-        /* Deep sleep in LPM3 (DCO off, zero timers running) until button or UART IRQ */
-        __bis_SR_register(LPM3_bits | GIE);
+        /* Sleep in LPM0 (SMCLK stays available for UART TX/RX) until next event */
+        __disable_interrupt();
+        if (!dungeon_game_has_pending_work())
+        {
+            __bis_SR_register(LPM0_bits | GIE);
+        }
+        else
+        {
+            __enable_interrupt();
+        }
     }
 }

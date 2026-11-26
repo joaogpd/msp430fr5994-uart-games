@@ -13,7 +13,7 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet(9600, 19200, 38400, 57600, 115200)]
-    [int]$Baud = 9600,
+    [int]$Baud = 115200,
 
     [Parameter(Position = 1)]
     [ValidateSet("auto", "putty", "inline")]
@@ -90,7 +90,9 @@ function Start-InlineTerminal([string]$ComPort, [int]$BaudRate) {
 
     try {
         $serial.Open()
-        Write-Host "Connected to $ComPort @ ${BaudRate} 8N1 (Ctrl+] to exit; press Reset on LaunchPad or any key to refresh)" -ForegroundColor DarkGray
+        # Request an immediate full-screen redraw (Ctrl+L) so no RESET press is needed
+        $serial.Write([byte[]]@(0x0C), 0, 1)
+        Write-Host "Connected to $ComPort @ ${BaudRate} 8N1 (Ctrl+] to exit; Ctrl+L to redraw)" -ForegroundColor DarkGray
 
         $buf = New-Object byte[] 1024
         $utf8 = [System.Text.Encoding]::ASCII
