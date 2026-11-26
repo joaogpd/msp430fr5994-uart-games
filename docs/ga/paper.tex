@@ -66,7 +66,8 @@ Episode fitness combines progression, exploration, combat, economy, and boss cle
 \begin{equation}
 \begin{aligned}
 F &= 500(\text{best\_floor} - 1) + 2\,\text{total\_explored} + 15\,\text{kills} \\
-  &\quad + \text{gold} + 60\,\text{shops\_bought} + 1500\,\text{boss\_kills} - 0.5\,\text{wall\_bumps}.
+  &\quad + \text{gold} + 60\,\text{shops\_bought} + 1500\,\text{boss\_kills} \\
+  &\quad - 0.5\,\text{wall\_bumps}.
 \end{aligned}
 \end{equation}
 Genomes are evaluated across \texttt{seeds} disjoint 16-bit training seeds via a 10-worker pool using elitism (2 elites for $\text{pop} \le 32$, 4 for $\text{pop} > 32$), tournament selection ($k=3$), crossover ($p_{\text{cross}} = 0.80$), and linearly decaying Gaussian mutation~\cite{goldberg,salimans} (Approach~A: rate 0.25, $\sigma: 0.45 \to 0.10$, clip $[-8, 8]$; Approach~B: rate 0.08, $\sigma: 0.35 \to 0.08$, clip $[-6, 6]$). Champions are evaluated post-training on 10 fixed unseen 16-bit seeds (\texttt{0x1357}--\texttt{0xACE1}) in both Float32 and Q7 \texttt{int8\_t}.
@@ -136,7 +137,7 @@ Experiment ID & Model & Obs & Class & Tier (Pop$\times$G$\times$S) & Wall (s) & 
 \textbf{Q7 Quantization Retention:} Across all 12 experiments, Q7 \texttt{int8\_t} achieves 101.08\% mean and 100.00\% median retention (Heuristic~A: 99.68\%--115.38\%; Tiny-MLP~B: 95.66\%--102.00\%). Retention above 100\% (e.g., \texttt{heur\_fair\_arcanist\_med} at 115.38\%) occurs when a Q7 tie-break alters a single discrete action and extends survival (\texttt{mean\_turns} 120.5 $\to$ 137.8).
 
 \subsection{Live Hardware-in-the-Loop (HIL) Validation}
-\texttt{ga/hil\_eval.py} evaluated the Deep Fair Knight Heuristic champion live over \texttt{COM4 @ 115200} baud against the physical MSP430FR5994 LaunchPad (\texttt{ga/results/hil\_knight\_deep.json}). Across 59 autonomous turns (\texttt{SEED:350F}, \texttt{BIOME: STONE CRYPT}), the agent collected 6~gold, handled 3 ANSI Device Status Report (\texttt{ESC[6n}) presence probes, triggered 0 low-HP \texttt{BEL} alerts, and incurred 0 deaths.
+\texttt{ga/hil\_eval.py} evaluated the Deep Fair Knight Heuristic champion live over \texttt{COM4 @ 115200} baud against the physical MSP430FR5994 LaunchPad (\texttt{ga/results/hil\_knight\_deep.json}). Across 59 autonomous turns (\texttt{SEED:350F}, \texttt{BIOME: STONE CRYPT}), the agent collected 6~gold, handled 3 ANSI Device Status Report (\texttt{ESC[5n}) presence probes, triggered 0 low-HP \texttt{BEL} alerts, and incurred 0 deaths.
 
 \section{On-Chip FRAM Deployment \& Resource Analysis}
 Both Deep Fair Knight champions are exported to \texttt{app/ga\_weights.h} and compiled into \texttt{app/dungeon\_game.c} (\texttt{ga\_select\_action\_q7()}) with TI MSP430 Linker \texttt{v21.6.1}. Table~\ref{tab:mem} lists the exact post-Stage-4 footprint from \texttt{Debug/mspgame.map}.
