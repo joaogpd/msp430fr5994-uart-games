@@ -3,37 +3,70 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "drivers/msp430/timer.h"
 
-#define DNG_W               20u
-#define DNG_H               15u
-#define DNG_TILE_COUNT      (DNG_W * DNG_H)              /* 300 tiles */
-#define DNG_PACKED_BYTES    (DNG_TILE_COUNT / 2u)        /* 150 bytes (4-bit nibbles) */
-#define DNG_FOG_BYTES       ((DNG_TILE_COUNT + 7u) / 8u) /* 38 bytes (1 bit/tile) */
+/* 48x22 map (1,056 tiles = 3.5x larger; fits 1:1 on an 80x24 terminal overlay) */
+#define DNG_W               48u
+#define DNG_H               22u
+#define DNG_TILE_COUNT      (DNG_W * DNG_H)              /* 1,056 tiles */
+
+/* 28x17 2-char/tile viewport (56x17 chars) + 22-col right HUD sidebar = 80x24 */
+#define DNG_VIEW_W          28u
+#define DNG_VIEW_H          17u
+
+#define DNG_MAX_ENEMIES     20u
+
+/* Low 4 bits of each packed map byte store the base tile type (0..15) */
+typedef enum
+{
+    DNG_WALL         = 0,
+    DNG_FLOOR        = 1,
+    DNG_STAIRS       = 2,
+    DNG_DOOR_CLOSED  = 3,
+    DNG_DOOR_OPEN    = 4,
+    DNG_CRACKED_WALL = 5,
+    DNG_TRAP         = 6,
+    DNG_SHRINE       = 7,
+    DNG_POTION       = 8,
+    DNG_MANA         = 9,
+    DNG_CHEST        = 10
+} dng_tile_t;
+
+/* High 4 bits of each packed map byte store per-tile flags */
+#define TILE_TYPE_MASK      0x0Fu
+#define TILE_F_EXPLORED     0x10u
+#define TILE_F_VISIBLE      0x20u
+#define TILE_F_REVEALED     0x40u   /* Trap spotted/triggered, or Shrine used */
+#define TILE_F_ALT          0x80u   /* Shrine variant: 0=Blood Altar, 1=Aegis Font */
 
 typedef enum
 {
-    DNG_WALL     = 0,
-    DNG_FLOOR    = 1,
-    DNG_STAIRS   = 2,
-    DNG_SLIME    = 3,
-    DNG_SKELETON = 4,
-    DNG_POTION   = 5,
-    DNG_MANA     = 6,
-    DNG_CHEST    = 7
-} dng_tile_t;
+    ENEMY_NONE     = 0,
+    ENEMY_SLIME    = 1,
+    ENEMY_SKELETON = 2,
+    ENEMY_ARCHER   = 3,
+    ENEMY_WRAITH   = 4,
+    ENEMY_MIMIC    = 5
+} dng_enemy_type_t;
 
 void dungeon_game_init(void);
 
-/* Call from UART RX ISR. Returns true to wake main() from LPM3. */
+/* Call from UART RX ISR. Returns true to wake main() from LPM. */
 bool dungeon_game_push_input(uint8_t cmd);
 
 /* Call from GPIO P5.5/P5.6 falling-edge ISR to start one-shot debounce. */
 bool dungeon_game_on_button_irq(void);
 
-/* Call from TIMER_A0 one-shot ISR every 40 ms while a button is active. */
-bool dungeon_game_on_debounce_timer(void);
+/* Call from TIMER_A0 one-shot ISR every 20 ms while a button is active. */
+bool dungeon_game_on_debounce_timer(timer_id_t id);
 
-/* Process pending command and render ANSI screen over UART if dirty (main context). */
+/* Call from TIMER_A1 periodic ISR (500 ms) to auto-detect terminal connect. */
+bool dungeon_game_on_probe_timer(timer_id_t id);
+
+/* Returns true if queued input, a probe tick, or a dirty frame is pending. */
+bool dungeon_game_has_pending_work(void);
+
+/* Process pending commands and render ANSI screen over UART if dirty (main context). */
 void dungeon_game_process(void);
 
 #endif /* APP_DUNGEON_GAME_H_ */

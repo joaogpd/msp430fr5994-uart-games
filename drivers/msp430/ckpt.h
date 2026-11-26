@@ -26,7 +26,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define CKPT_MAX_PAYLOAD    (256u)
+#define CKPT_MAX_PAYLOAD    (1536u)
 
 /*
  * Fault-injection test build (test 4): set to 1 to compile the cut points
