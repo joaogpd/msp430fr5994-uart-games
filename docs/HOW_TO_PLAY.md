@@ -11,7 +11,7 @@ The active firmware in [`main.c`](../main.c) runs **Dungeon Crawler** (`app/dung
 | **UART Interface** | eUSCI_A0 Backchannel UART (`P2.0` TXD / `P2.1` RXD) |
 | **Serial Parameters** | **115200 baud**, **8N1**, no flow control |
 | **Terminal Size** | **80 × 24** (or larger) |
-| **Clocks & Sleep** | 8 MHz DCO (`MCLK`/`SMCLK`), 32.768 kHz LFXT (`ACLK`, low-drive `LFXTDRIVE_0`, `HFXT`/`VLO` off), sleeps in `LPM3` with `eUSCI_A0` `SMCLKREQEN` when UART TX is idle (`LPM0` only while TX shifts) |
+| **Clocks & Sleep** | 4 MHz DCO (`MCLK`/`SMCLK`), 32.768 kHz LFXT (`ACLK`, low-drive `LFXTDRIVE_0`, `HFXT`/`VLO` off), sleeps in `LPM1` (`PMM31`-safe, `SMCLK` active for 115200 baud cold-idle RX) when UART TX is idle (`LPM0` while TX shifts); `LPM3` + `SMCLKREQEN` is avoided because DCO/FRAM wake-up latency exceeds the `4.34 us` start-bit window and drops byte 1 |
 
 > **Alternate Game:** This repository also includes an arcade space shooter ([`app/space_game.h`](../app/space_game.h) / [`app/space_game.c`](../app/space_game.c)). See [Switching to `space_game`](#switching-to-space_game) in Troubleshooting to build and flash it.
 
