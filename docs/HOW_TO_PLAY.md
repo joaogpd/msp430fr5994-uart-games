@@ -11,7 +11,7 @@ The active firmware in [`main.c`](../main.c) runs **Dungeon Crawler** (`app/dung
 | **UART Interface** | eUSCI_A0 Backchannel UART (`P2.0` TXD / `P2.1` RXD) |
 | **Serial Parameters** | **115200 baud**, **8N1**, no flow control |
 | **Terminal Size** | **80 × 24** (or larger) |
-| **Clocks & Sleep** | 8 MHz DCO (`MCLK`/`SMCLK`), 32.768 kHz LFXT (`ACLK`), sleeps in `LPM0` between events |
+| **Clocks & Sleep** | 8 MHz DCO (`MCLK`/`SMCLK`), 32.768 kHz LFXT (`ACLK`, low-drive `LFXTDRIVE_0`, `HFXT`/`VLO` off), sleeps in `LPM3` with `eUSCI_A0` `SMCLKREQEN` when UART TX is idle (`LPM0` only while TX shifts) |
 
 > **Alternate Game:** This repository also includes an arcade space shooter ([`app/space_game.h`](../app/space_game.h) / [`app/space_game.c`](../app/space_game.c)). See [Switching to `space_game`](#switching-to-space_game) in Troubleshooting to build and flash it.
 
@@ -35,7 +35,7 @@ The active firmware in [`main.c`](../main.c) runs **Dungeon Crawler** (`app/dung
 
 You do **not** need to press the LaunchPad's `RESET` button after opening the terminal:
 
-- **VT100 Auto-Detect (PuTTY):** Every 500 ms (`TIMER_A1`), the firmware sends a VT100 Device Status Report probe (`ESC [ 5 n`). When your terminal replies (`ESC [ 0 n`), the game automatically triggers a full-screen redraw.
+- **VT100 Auto-Detect (PuTTY):** Before a terminal connects, `TIMER_A1` sends a VT100 Device Status Report probe (`ESC [ 5 n`) every 500 ms. Once your terminal replies (`ESC [ 0 n`) or sends any keystroke, the game triggers a full-screen redraw and gates `TIMER_A1` to `0 Hz` during idle play (waking only on UART RX, buttons, AI Demo ticks, or Low-HP alerts).
 - **Inline Terminal Auto-Redraw:** `tools/launch_terminal.ps1` immediately sends `Ctrl+L` (`0x0C`) upon opening the COM port to trigger an instant full-screen redraw.
 - **Manual Redraw:** Press **`Ctrl+L`**, **`Enter`**, or **`L`** at any time to redraw the entire screen without advancing a turn.
 
@@ -86,7 +86,7 @@ Buttons are debounced in 20 ms steps (`TIMER_A0`, 0 Hz when idle); a **hold** re
 | **Hold `S1 + S2`** (~0.8 s) | Save checkpoint to FRAM (`P`) | Blocked while dead |
 | **Hold `S1` on boot/reset** | — | Skip FRAM auto-resume and open Class Select for a fresh Floor 1 run |
 
-- **Red `LED1` (`P1.0`):** Blinks every **500 ms** on **Low HP**; stays solid **ON** on **Game Over**; **OFF** during normal active play.
+- **Red `LED1` (`P1.0`):** Flashes a crisp **25 ms** pulse every **500 ms** (`TIMER_A2` one-shot) on **Low HP**; stays solid **ON** on **Game Over**; **OFF** during normal active play.
 - **Green `LED2` (`P1.1`):** Kept **OFF** after FRAM saves to conserve low-power sleep current.
 
 ---
@@ -141,7 +141,7 @@ BOSS[########]24
 Whenever your HP drops to **`≤ 25%` of Max HP** or **`≤ 3 HP`** (while alive):
 - **Row 1 Banner** switches to a pulsing red `[! LOW HP !] FL:xx HP:xx/xx PRESS 1 FOR POTION OR RETREAT!` alert (alternating bright white-on-red and red-on-black every 500 ms).
 - **Sidebar Row 2** flashes `!HP:xx/xx` in red.
-- **Hardware LED:** Red **`LED1` (`P1.0`)** blinks every **500 ms** (`TIMER_A1`).
+- **Hardware LED:** Red **`LED1` (`P1.0`)** flashes a **25 ms** pulse every **500 ms** (`TIMER_A1` cadence + `TIMER_A2` one-shot).
 - **Audio Cue:** Emits an immediate ANSI **`BEL` (`0x07`)** on taking critical damage, plus a periodic `BEL` every **2.0 s** while Low HP persists and a terminal is connected.
 
 ### Map Glyphs
@@ -181,7 +181,7 @@ Each viewport tile is rendered as a 2-character wide ANSI glyph; the `M` Full-Fl
 
 ### Playable Classes & Seeded Runs
 
-Every new run opens the **Class Select** screen (`1`, `2`, `3`, or `4` for **AI Demo**; `W`/`Space`/`S2` starts Knight immediately) and mixes the free-running `TIMER_A1` counter into the PRNG to generate a **4-hex Run Seed** (`SEED:XXXX`).
+Every new run opens the **Class Select** screen (`1`, `2`, `3`, or `4` for **AI Demo**; `W`/`Space`/`S2` starts Knight immediately) and mixes event-timing (`TA0R`/`TA1R` + input history) entropy into the PRNG to generate a **4-hex Run Seed** (`SEED:XXXX`).
 
 | Key | Class | Code | HP | MP | ATK | DEF | Gold | Starting Belt | Passive Ability |
 | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :--- |
@@ -321,8 +321,8 @@ Because FRAM retains data without power and writes atomically across two slots, 
   - Check the USB cable and verify the LaunchPad's eZ-FET `TXD`/`RXD` jumpers are installed.
   - Check Device Manager for the COM port number and pass it explicitly: `.\tools\launch_terminal.ps1 -Port COMx`.
 - **Blank terminal screen after connecting:**
-  - Press **`Ctrl+L`**, **`Enter`**, or **`L`** to force a full-screen redraw without spending a turn.
-  - In PuTTY, wait ~0.5 s for the automatic VT100 DSR probe to redraw the screen.
+  - On a fresh boot before any keystroke, wait ~0.5 s in PuTTY for the automatic VT100 DSR probe (`ESC [ 5 n`) to redraw the screen (or use `play.bat inline`, which sends `Ctrl+L` automatically).
+  - If reconnecting a terminal to an already-connected board (where `TIMER_A1` is gated to `0 Hz`), press **`Ctrl+L`**, **`Enter`**, or **`L`** to force a full-screen redraw without spending a turn.
 - **Sidebar or Full-Floor Map (`M`) wraps or looks misaligned:**
   - Resize your terminal window to at least **80 columns × 24 rows** and press **`Ctrl+L`** to redraw.
 - **Garbled text or unresponsive keys:**
