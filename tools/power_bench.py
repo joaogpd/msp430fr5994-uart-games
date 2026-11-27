@@ -219,6 +219,8 @@ class AnsiScreen:
         self.on_dsr = on_dsr
         self.validator = AnsiStreamValidator() if validate else None
         self.raw_chunks: Optional[bytearray] = None
+        self._frame_header_open: bool = False
+        self._awaiting_full_frame: bool = False
 
     def clear(self) -> None:
         for rr in range(H):
@@ -232,7 +234,6 @@ class AnsiScreen:
         if self.raw_chunks is not None:
             self.raw_chunks.extend(data)
 
-        frame_render_seen = False
         for b in data:
             if self.validator is not None:
                 self.validator.feed_byte(b)
@@ -248,6 +249,7 @@ class AnsiScreen:
                     if self.r < H - 1:
                         self.r += 1
                 elif 0x20 <= b <= 0x7E:
+                    self._frame_header_open = False
                     if 0 <= self.r < H and 0 <= self.c < W:
                         self.grid[self.r][self.c] = chr(b)
                         self.c += 1
@@ -270,17 +272,22 @@ class AnsiScreen:
                             c1 = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
                             self.r = max(0, min(H - 1, r1 - 1))
                             self.c = max(0, min(W - 1, c1 - 1))
-                        if self.r == 0 and self.c == 0:
-                            frame_render_seen = True
+                        if self.r == 0 and self.c == 0 and not self._frame_header_open:
+                            self.frame_timestamps.append(t_now)
+                            self._frame_header_open = True
                     elif ch == "J" and self.csi == "2":
                         self.clear()
-                        frame_render_seen = True
+                        self._awaiting_full_frame = True
+                        self.frame_timestamps.append(t_now)
+                        self._frame_header_open = True
                     elif ch == "K":
                         for cc in range(self.c, W):
                             self.grid[self.r][cc] = " "
                     elif ch == "l" and self.csi == "?25":
                         # Firmware begins every rendered frame with \x1b[2J\x1b[H\x1b[?25l or \x1b[?25l
-                        frame_render_seen = True
+                        if not self._frame_header_open:
+                            self.frame_timestamps.append(t_now)
+                            self._frame_header_open = True
                     elif ch == "n" and self.csi == "5":
                         self.dsr_count += 1
                         if self.on_dsr is not None:
@@ -295,9 +302,6 @@ class AnsiScreen:
                     self.csi = ""
                 else:
                     self.csi += ch
-
-        if frame_render_seen:
-            self.frame_timestamps.append(t_now)
 
     def row(self, r: int) -> str:
         return "".join(self.grid[r])
@@ -318,7 +322,7 @@ class AnsiScreen:
                     return vr, vc, DIR_GLYPHS[g]
         return -1, -1, 0
 
-    def parse_hud(self) -> Dict[str, int]:
+    def parse_hud(self) -> Dict[str, object]:
         r0 = self.row(0)
         r1 = self.row(1)
         r2 = self.row(2)
@@ -342,6 +346,7 @@ class AnsiScreen:
 
         cls_id = 1 if "ARC" in r4 else (2 if "ROG" in r4 else 0)
         dir_map = {"N": 0, "E": 1, "S": 2, "W": 3}
+        hud_valid = bool(m_hp and m_pos and ("DIR:" in r4))
         return {
             "floor": int(m_fl.group(1)) if m_fl else 1,
             "hp": int(m_hp.group(1)) if m_hp else 0,
@@ -366,7 +371,18 @@ class AnsiScreen:
             "class_select": 1 if "NEW ADVENTURE" in r0 else 0,
             "ai_heuristic": 1 if "AI:HEURISTIC" in r0 else 0,
             "ai_mlp": 1 if "AI:TINY-MLP" in r0 else 0,
+            "hud_valid": hud_valid,
         }
+
+    def is_frame_complete(self) -> bool:
+        if self.esc != 0:
+            return False
+        st = self.detect_state()
+        if st in ("class_select", "hof_overlay", "help_overlay", "map_overlay", "game_over", "ai_demo_ended"):
+            return True
+        if st in ("human_play", "low_hp", "ai_heuristic", "ai_mlp"):
+            return bool(self.parse_hud()["hud_valid"])
+        return False
 
     def detect_state(self) -> str:
         r0 = self.row(0)
@@ -410,6 +426,41 @@ def drain_serial(ser, scr: AnsiScreen, duration_s: float, poll_s: float = 0.01) 
         if time.perf_counter() >= deadline:
             break
         time.sleep(min(poll_s, max(0.001, deadline - time.perf_counter())))
+
+
+def drain_frame(
+    ser,
+    scr: AnsiScreen,
+    max_wait_s: float = 0.45,
+    settle_s: float = 0.06,
+    poll_s: float = 0.01,
+) -> bool:
+    """Drain serial until the current frame completes and settles, or max_wait_s elapses."""
+    t0 = time.perf_counter()
+    deadline = t0 + max_wait_s
+    last_rx_t: Optional[float] = None
+
+    while True:
+        n = getattr(ser, "in_waiting", 0)
+        if n and n > 0:
+            chunk = ser.read(n)
+            if chunk:
+                scr.feed(chunk, ser=ser)
+                last_rx_t = time.perf_counter()
+                continue
+
+        now = time.perf_counter()
+        if now >= deadline:
+            break
+
+        quiet_s = (now - last_rx_t) if last_rx_t is not None else (now - t0)
+        if quiet_s >= settle_s and scr.is_frame_complete():
+            scr._awaiting_full_frame = False
+            break
+
+        time.sleep(min(poll_s, max(0.001, deadline - now)))
+
+    return scr.is_frame_complete()
 
 
 def wait_until(
@@ -468,20 +519,31 @@ def seek_low_hp(
         if time.perf_counter() >= deadline:
             return False
 
+        if not scr.is_frame_complete() or scr._awaiting_full_frame:
+            drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
+
         st = scr.detect_state()
         hud = scr.parse_hud()
         if target_death:
             if st == "game_over" or hud["human_dead"]:
                 return True
+            if st == "class_select":
+                return True
         else:
             if hud["low_hp"] == 1 and not hud["dead"]:
                 return True
             if st in ("game_over", "ai_demo_ended"):
-                # Restart Knight if accidental death during setup
+                # Restart Knight if accidental death during setup (only on settled terminal state)
                 send_bytes(ser, scr, b"w")
                 wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+                drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
                 send_bytes(ser, scr, b"1")
-                wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 1.5)
+                wait_until(
+                    ser,
+                    scr,
+                    lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(),
+                    1.5,
+                )
                 world.clear()
                 visited.clear()
                 last_floor = -1
@@ -489,18 +551,28 @@ def seek_low_hp(
 
         if st == "class_select":
             send_bytes(ser, scr, b"1")
-            wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 1.5)
+            wait_until(
+                ser,
+                scr,
+                lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(),
+                1.5,
+            )
             continue
 
         if st in ("hof_overlay", "help_overlay", "map_overlay"):
             send_bytes(ser, scr, b" ")
-            drain_serial(ser, scr, 0.2)
+            drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
+            continue
+
+        if not hud["hud_valid"]:
+            send_bytes(ser, scr, b"\x0c")
+            drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
             continue
 
         pvr, pvc, _ = scr.find_player_in_viewport()
         if pvr < 0:
             send_bytes(ser, scr, b"\x0c")
-            drain_serial(ser, scr, 0.25)
+            drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
             continue
 
         if hud["floor"] != last_floor:
@@ -534,7 +606,7 @@ def seek_low_hp(
         adj_enemy = any(abs(ex - px) + abs(ey - py) == 1 for ex, ey in enemies)
         if adj_enemy:
             send_bytes(ser, scr, b" ")
-            drain_serial(ser, scr, 0.14)
+            drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
             continue
 
         # 2. Build BFS over known walkable world tiles
@@ -651,10 +723,16 @@ def seek_low_hp(
                         action = key
 
         if action is None:
-            action = "w"
+            # All neighbors blocked or unknown; wait safely via Meditate only when HUD is valid (never blind 'w')
+            if st in ("human_play", "low_hp") and hud["hud_valid"] and not hud["dead"]:
+                send_bytes(ser, scr, b" ")
+            else:
+                send_bytes(ser, scr, b"\x0c")
+            drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
+            continue
 
         send_bytes(ser, scr, action.encode("ascii"))
-        drain_serial(ser, scr, 0.14)
+        drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
 
     return False
 
@@ -662,45 +740,55 @@ def seek_low_hp(
 def ensure_class_select(ser, scr: AnsiScreen, timeout_s: float = 30.0) -> bool:
     """Reliably transition the firmware to Class Select ('NEW ADVENTURE')."""
     send_bytes(ser, scr, b"\x0c")
-    drain_serial(ser, scr, 0.25)
+    drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
 
     deadline = time.perf_counter() + timeout_s
     tried_n_in_low_hp = False
 
     while time.perf_counter() < deadline:
+        if not scr.is_frame_complete() or scr._awaiting_full_frame:
+            drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
+
         st = scr.detect_state()
         if st == "class_select":
             return True
         if st in ("hof_overlay", "help_overlay", "map_overlay"):
             send_bytes(ser, scr, b" ")
             wait_until(ser, scr, lambda: scr.detect_state() not in ("hof_overlay", "help_overlay", "map_overlay"), 1.0)
+            drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
             continue
         if st in ("ai_heuristic", "ai_mlp", "ai_demo_ended"):
             send_bytes(ser, scr, b"n")
             wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+            drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
             continue
         if st == "game_over":
             send_bytes(ser, scr, b"w")
             wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+            drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
             continue
         if st == "low_hp" and not tried_n_in_low_hp:
             # [! LOW HP !] masks AI:HEURISTIC / AI:TINY-MLP on Row 0; probe 'n' once first
             tried_n_in_low_hp = True
             send_bytes(ser, scr, b"n")
             if wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 0.5):
+                drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
                 return True
             continue
         if st in ("human_play", "low_hp"):
             rem = max(2.0, deadline - time.perf_counter() - 2.0)
             seek_low_hp(ser, scr, target_death=True, timeout_s=rem)
+            if not scr.is_frame_complete() or scr._awaiting_full_frame:
+                drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
             if scr.detect_state() == "game_over":
                 send_bytes(ser, scr, b"w")
                 wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+                drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
             continue
 
         # Unknown state: ask for redraw
         send_bytes(ser, scr, b"\x0c")
-        drain_serial(ser, scr, 0.3)
+        drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
 
     raise TimeoutError(
         "Unable to reach Class Select ('NEW ADVENTURE') within timeout. "
@@ -844,12 +932,20 @@ def run_profile(
         if profile == "play":
             st = scr.detect_state()
             if st == "game_over":
-                send_bytes(ser, scr, b"w")
-                wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
-                send_bytes(ser, scr, b"1")
-                wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 1.5)
-                restarts += 1
-                next_key_t = time.perf_counter() + 1.0
+                drain_frame(ser, scr, max_wait_s=0.30, settle_s=0.05)
+                if scr.detect_state() == "game_over":
+                    send_bytes(ser, scr, b"w")
+                    wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+                    drain_frame(ser, scr, max_wait_s=0.30, settle_s=0.05)
+                    send_bytes(ser, scr, b"1")
+                    wait_until(
+                        ser,
+                        scr,
+                        lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(),
+                        1.5,
+                    )
+                    restarts += 1
+                    next_key_t = time.perf_counter() + 1.0
             elif now >= next_key_t:
                 key = PLAY_SEQUENCE[seq_idx % len(PLAY_SEQUENCE)]
                 seq_idx += 1
@@ -903,9 +999,13 @@ def run_profile(
     }
 
 
-def verify_uart(ser, scr: AnsiScreen) -> Dict[str, object]:
+def verify_uart(
+    ser,
+    scr: AnsiScreen,
+    results_out: Optional[List[Dict[str, object]]] = None,
+) -> Dict[str, object]:
     """Execute the 7-part Zero-UX-Loss COM4 UART verification suite."""
-    results: List[Dict[str, object]] = []
+    results: List[Dict[str, object]] = results_out if results_out is not None else []
 
     def record(name: str, passed: bool, detail: str) -> None:
         results.append({"check": name, "passed": passed, "detail": detail})
@@ -929,8 +1029,9 @@ def verify_uart(ser, scr: AnsiScreen) -> Dict[str, object]:
 
     # 2. Cold-Idle Single-Byte Wakeups (10 iterations of 1.5..2.7 s silence)
     send_bytes(ser, scr, b"1")
-    if not wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 2.0):
+    if not wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(), 2.0):
         raise RuntimeError("Failed to enter human_play for cold-idle wakeup check")
+    drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
     wake_checks = [
         (b"?", lambda: scr.detect_state() == "help_overlay", "help_overlay"),
         (b" ", lambda: scr.detect_state() in ("human_play", "low_hp"), "exit_help"),
@@ -942,8 +1043,15 @@ def verify_uart(ser, scr: AnsiScreen) -> Dict[str, object]:
         delay_s = 1.5 + (i % 4) * 0.4
         drain_serial(ser, scr, delay_s)
         tx_byte, pred, label = wake_checks[i % len(wake_checks)]
+        frames_before = len(scr.frame_timestamps)
         send_bytes(ser, scr, tx_byte)
-        ok = wait_until(ser, scr, pred, 1.0)
+        ok = wait_until(
+            ser,
+            scr,
+            lambda p=pred, fb=frames_before: len(scr.frame_timestamps) > fb and scr.is_frame_complete() and p(),
+            1.2,
+        )
+        drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
         if not ok:
             record("2_cold_idle_wakeups", False, f"iter={i} delay={delay_s:.1f}s key={tx_byte!r} expected={label} row0={scr.row(0).strip()} row19={scr.row(19).strip()}")
     record("2_cold_idle_wakeups", True, "10/10 cold-idle (1.5-2.7 s) single-byte wakeups succeeded")
@@ -956,52 +1064,57 @@ def verify_uart(ser, scr: AnsiScreen) -> Dict[str, object]:
         (b"\x1b[D", "<<", "W"),
     ]
     for seq, expected_glyph, expected_dir in arrow_tests:
-        send_bytes(ser, scr, seq)
-        ok = wait_until(
-            ser,
-            scr,
-            lambda g=expected_glyph, d=expected_dir: (
-                scr.find_player_in_viewport()[2] == DIR_GLYPHS[g]
+        def _arrow_pred(g: str = expected_glyph, d: str = expected_dir, fb: int = 0) -> bool:
+            if len(scr.frame_timestamps) <= fb or not scr.is_frame_complete():
+                return False
+            pvr, _, pdir = scr.find_player_in_viewport()
+            return (
+                (pvr >= 0 and pdir == DIR_GLYPHS[g])
                 or f"DIR:{d}" in scr.row(4)
                 or scr.detect_state() == "game_over"
-            ),
-            1.0,
-        )
+            )
+
+        fb0 = len(scr.frame_timestamps)
+        send_bytes(ser, scr, seq)
+        ok = wait_until(ser, scr, lambda fb=fb0, g=expected_glyph, d=expected_dir: _arrow_pred(g, d, fb), 1.2)
+        drain_frame(ser, scr, max_wait_s=0.30, settle_s=0.04)
         if scr.detect_state() == "game_over":
             send_bytes(ser, scr, b"w")
             wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+            drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
             send_bytes(ser, scr, b"1")
-            wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 1.5)
+            wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(), 1.5)
+            drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
+            fb0 = len(scr.frame_timestamps)
             send_bytes(ser, scr, seq)
-            ok = wait_until(
-                ser,
-                scr,
-                lambda g=expected_glyph, d=expected_dir: (
-                    scr.find_player_in_viewport()[2] == DIR_GLYPHS[g] or f"DIR:{d}" in scr.row(4)
-                ),
-                1.0,
-            )
+            ok = wait_until(ser, scr, lambda fb=fb0, g=expected_glyph, d=expected_dir: _arrow_pred(g, d, fb), 1.2)
+            drain_frame(ser, scr, max_wait_s=0.30, settle_s=0.04)
         if not ok:
             record("3_csi_arrows", False, f"arrow={seq!r} expected={expected_glyph}/{expected_dir} row4={scr.row(4).strip()}")
     record("3_csi_arrows", True, "4/4 CSI arrow sequences (Up/Right/Down/Left) verified")
 
     # 4. 5x Rapid Multi-Byte Bursts (<= 12 B < 15 B CMD_QUEUE_SIZE)
     bursts = [
-        (b"? ? ? ? ? ", lambda: scr.detect_state() in ("human_play", "low_hp")),  # 10 bytes: opens/closes help 5x
-        (b"m m m m c ", lambda: scr.detect_state() in ("human_play", "low_hp")),  # 10 bytes: opens/closes map + recenter
+        (b"w d s a c", lambda: "CAMERA RE-CENTERED" in scr.row(19) or scr.detect_state() == "game_over"),  # 9 bytes
+        (b"a s d w  ", lambda: "MEDITATED" in scr.row(19) or scr.detect_state() == "game_over"),  # 9 bytes
         (b"\x1b[A\x1b[C\x1b[B\x1b[D", lambda: "DIR:W" in scr.row(4) or scr.detect_state() == "game_over"),  # 12 bytes: 4 CSI arrows
         (b"\x1b[C\x1b[B\x1b[D\x1b[A", lambda: "DIR:N" in scr.row(4) or scr.detect_state() == "game_over"),  # 12 bytes
-        (b"h h ? ? c", lambda: "CAMERA RE-CENTERED" in scr.row(19) or scr.detect_state() in ("human_play", "low_hp")),  # 9 bytes
+        (b"s a w d c", lambda: ("CAMERA RE-CENTERED" in scr.row(19) and "DIR:E" in scr.row(4)) or scr.detect_state() == "game_over"),  # 9 bytes
     ]
     for idx, (burst, pred) in enumerate(bursts):
         assert len(burst) <= 12
         if scr.detect_state() == "game_over":
+            drain_frame(ser, scr, max_wait_s=0.30, settle_s=0.05)
             send_bytes(ser, scr, b"w")
             wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+            drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
             send_bytes(ser, scr, b"1")
-            wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 1.5)
+            wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(), 1.5)
+            drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
+        fb0 = len(scr.frame_timestamps)
         send_bytes(ser, scr, burst)
-        ok = wait_until(ser, scr, pred, 1.5)
+        ok = wait_until(ser, scr, lambda p=pred, fb=fb0: len(scr.frame_timestamps) > fb and scr.is_frame_complete() and p(), 1.8)
+        drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
         if not ok:
             record("4_rapid_bursts", False, f"burst #{idx} {burst!r} failed: state={scr.detect_state()} row4={scr.row(4).strip()} row19={scr.row(19).strip()}")
     record("4_rapid_bursts", True, "5/5 rapid bursts (<= 12 B) processed with zero dropped commands")
@@ -1009,15 +1122,20 @@ def verify_uart(ser, scr: AnsiScreen) -> Dict[str, object]:
     # 5. 80x24 ANSI/SGR Integrity across Class Select, Help, Full Map, Gameplay
     ensure_class_select(ser, scr)
     send_bytes(ser, scr, b"1")
-    wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 1.5)
+    wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(), 1.5)
+    drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
     send_bytes(ser, scr, b"?")
     ok_help = wait_until(ser, scr, lambda: scr.detect_state() == "help_overlay", 1.0)
+    drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
     send_bytes(ser, scr, b" ")
-    wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 1.0)
+    wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(), 1.0)
+    drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
     send_bytes(ser, scr, b"m")
     ok_map = wait_until(ser, scr, lambda: scr.detect_state() == "map_overlay", 1.0)
+    drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
     send_bytes(ser, scr, b" ")
-    wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 1.0)
+    wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(), 1.0)
+    drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
     err_cnt = len(scr.validator.errors) if scr.validator else 0
     record(
         "5_ansi_sgr_integrity",
@@ -1057,18 +1175,18 @@ def verify_uart(ser, scr: AnsiScreen) -> Dict[str, object]:
 
     # 7. Low-HP BEL + Banner Pulse Cadence
     send_bytes(ser, scr, b"1")
-    wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 2.0)
+    wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(), 2.0)
     ok_low = seek_low_hp(ser, scr, target_death=False, timeout_s=30.0)
     if not ok_low:
         record("7_low_hp_bel_cadence", False, "Failed to reach Low-HP state within 30 s")
     bel0 = scr.bel_count
-    drain_serial(ser, scr, 4.6)
+    drain_serial(ser, scr, 5.8)
     bel_delta = scr.bel_count - bel0
     hud_low = scr.parse_hud()
     record(
         "7_low_hp_bel_cadence",
         hud_low["low_hp"] == 1 and bel_delta >= 2 and len(scr.validator.errors) == 0,
-        f"low_hp={hud_low['low_hp']}, bel_delta={bel_delta} over 4.6 s, errors={len(scr.validator.errors)}",
+        f"low_hp={hud_low['low_hp']}, bel_delta={bel_delta} over 5.8 s, errors={len(scr.validator.errors)}",
     )
 
     # Return cleanly to Class Select
@@ -1370,13 +1488,113 @@ def run_self_test() -> None:
     assert res_play["keys_sent"] >= 2
     assert len(scr.validator.errors) == 0
 
-    # Temp file write sanity (ensure no repo files created)
+    # 5. Split frame header timestamp coalescing & hud_valid mid-frame guard
+    s_ts = AnsiScreen()
+    for ch_chunk in (b"\x1b", b"[2J\x1b[", b"H\x1b[?25", b"l", b"\x1b[1;37;41m [! LOW HP !] \x1b[0m"):
+        s_ts.feed(ch_chunk)
+    assert len(s_ts.frame_timestamps) == 1, f"Expected 1 coalesced timestamp, got {len(s_ts.frame_timestamps)}"
+    assert s_ts.parse_hud()["hud_valid"] is False
+    assert s_ts.is_frame_complete() is False
+
+    # 6. Chunked/split-frame \x1b[2J delayed-arrival (>140 ms) regression test
+    class _DelayedChunkSerial(_FakeSerial):
+        """Simulates 115200-baud mid-frame delays where \\x1b[2J arrives >140 ms before HUD/YOU DIED!."""
+
+        def __init__(self) -> None:
+            self._scheduled: List[Tuple[float, bytes]] = []
+            self.tx_states_at_send: List[Tuple[bytes, str, bool]] = []
+            super().__init__()
+
+        def _emit(self, payload: bytes) -> None:
+            marker_2j = payload.find(b"\x1b[2J")
+            marker_hud = payload.find(b"\x1b[2;58H")
+            marker_row20 = payload.find(b"\x1b[20;1H")
+            if marker_2j >= 0 and marker_hud > 0 and marker_row20 > marker_hud:
+                now = time.perf_counter()
+                self.rx_buf.extend(payload[:marker_hud])
+                self._scheduled.append((now + 0.16, payload[marker_hud:marker_row20]))
+                self._scheduled.append((now + 0.22, payload[marker_row20:]))
+            else:
+                self.rx_buf.extend(payload)
+
+        @property
+        def in_waiting(self) -> int:
+            now = time.perf_counter()
+            due = [chunk for ts, chunk in self._scheduled if ts <= now]
+            if due:
+                self._scheduled = [(ts, chunk) for ts, chunk in self._scheduled if ts > now]
+                for chunk in due:
+                    self.rx_buf.extend(chunk)
+            return super().in_waiting
+
+    dser = _DelayedChunkSerial()
+    dscr = AnsiScreen()
+    dser.mode = "human"
+    dser.hp = 1
+    dser.px, dser.py = 7, 5  # Adjacent to enemy at (8, 5)
+    dser._render_current()
+    drain_frame(dser, dscr, max_wait_s=0.6, settle_s=0.05)
+    assert dscr.detect_state() == "low_hp" and dscr.parse_hud()["hud_valid"] is True
+
+    # Wrap write to capture screen state at the exact moment 'w' is transmitted
+    orig_write = dser.write
+
+    def _tracked_write(data: bytes) -> int:
+        if b"w" in data:
+            dser.tx_states_at_send.append((data, dscr.detect_state(), bool(dscr.parse_hud()["hud_valid"])))
+        return orig_write(data)
+
+    dser.write = _tracked_write  # type: ignore[method-assign]
+    assert ensure_class_select(dser, dscr, timeout_s=10.0)
+    assert dscr.detect_state() == "class_select"
+    assert dser.tx_states_at_send == [(b"w", "game_over", True)], (
+        f"Expected 'w' only on settled game_over, got {dser.tx_states_at_send}"
+    )
+
+    # Verify seek_low_hp never emits 'w' when HUD is invalid mid-frame (emits Ctrl+L instead)
+    dscr_mid = AnsiScreen()
+    dscr_mid.feed(b"\x1b[2J\x1b[H\x1b[?25l\x1b[1;37;44m MSP430 DUNGEON FL:01\x1b[0m")
+    assert dscr_mid.parse_hud()["hud_valid"] is False
+    dser2 = _FakeSerial()
+    dser2.mode = "human"
+    dser2.hp = 16
+    dser2.px, dser2.py = 7, 5
+    dser2.rx_buf.clear()
+    assert seek_low_hp(dser2, dscr_mid, target_death=False, timeout_s=5.0, max_steps=20)
+    assert dser2.tx_log[0] == b"\x0c", f"Expected Ctrl+L when HUD invalid, got {dser2.tx_log[0]!r}"
+    assert all(b"w" not in tx for tx in dser2.tx_log), f"Unexpected 'w' emitted: {dser2.tx_log}"
+
+    # Temp file write & _persist_outputs failure-persistence sanity
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "test_summary.json"
         p.write_text(json.dumps(res_play), encoding="utf-8")
         assert p.exists()
+        fail_log = Path(td) / "fail.log"
+        fail_json = Path(td) / "fail.json"
+        scr_fail = AnsiScreen()
+        scr_fail.raw_chunks = bytearray(b"PARTIAL_STREAM")
+        _persist_outputs(str(fail_log), str(fail_json), scr_fail, {"error": "TimeoutError: test"})
+        assert fail_log.read_bytes() == b"PARTIAL_STREAM"
+        assert json.loads(fail_json.read_text(encoding="utf-8"))["error"] == "TimeoutError: test"
 
     print("[SELF-TEST] All power_bench.py offline checks PASSED.", flush=True)
+
+
+def _persist_outputs(
+    out_log_path: Optional[str],
+    out_json_path: Optional[str],
+    scr: AnsiScreen,
+    summary: Dict[str, object],
+) -> None:
+    if out_log_path and scr.raw_chunks is not None:
+        out_log = Path(out_log_path)
+        out_log.parent.mkdir(parents=True, exist_ok=True)
+        out_log.write_bytes(bytes(scr.raw_chunks))
+
+    if out_json_path:
+        out_json = Path(out_json_path)
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 def main() -> int:
@@ -1421,42 +1639,43 @@ def main() -> int:
         "baud": args.baud,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
+    verify_checks: List[Dict[str, object]] = []
+    runs: List[Dict[str, object]] = []
 
-    with serial.Serial(args.port, args.baud, timeout=0.05, write_timeout=0.5) as ser:
-        if args.verify_uart:
-            v_res = verify_uart(ser, scr)
-            summary["verify_uart"] = v_res
-        else:
-            profiles = (
-                ["idle", "ai-heuristic", "ai-mlp", "low-hp", "play"]
-                if args.profile == "all"
-                else [args.profile]
-            )
-            runs = []
-            for idx, prof in enumerate(profiles):
-                res = run_profile(
-                    ser,
-                    scr,
-                    profile=prof,
-                    duration_s=args.duration,
-                    wait_start=args.wait_start,
-                    countdown=args.countdown if (args.wait_start or idx == 0) else 0,
+    try:
+        with serial.Serial(args.port, args.baud, timeout=0.05, write_timeout=0.5) as ser:
+            if args.verify_uart:
+                v_res = verify_uart(ser, scr, results_out=verify_checks)
+                summary["verify_uart"] = v_res
+            else:
+                profiles = (
+                    ["idle", "ai-heuristic", "ai-mlp", "low-hp", "play"]
+                    if args.profile == "all"
+                    else [args.profile]
                 )
-                runs.append(res)
-                print(json.dumps(res, indent=2), flush=True)
-            ensure_class_select(ser, scr)
+                for idx, prof in enumerate(profiles):
+                    res = run_profile(
+                        ser,
+                        scr,
+                        profile=prof,
+                        duration_s=args.duration,
+                        wait_start=args.wait_start,
+                        countdown=args.countdown if (args.wait_start or idx == 0) else 0,
+                    )
+                    runs.append(res)
+                    print(json.dumps(res, indent=2), flush=True)
+                ensure_class_select(ser, scr)
+                summary["profiles"] = runs
+    except Exception as exc:
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+        if args.verify_uart and "verify_uart" not in summary:
+            summary["verify_uart"] = {"passed": False, "checks": verify_checks}
+        elif not args.verify_uart and "profiles" not in summary:
             summary["profiles"] = runs
-            summary["validator"] = scr.validator.summary() if scr.validator else {}
-
-    if args.out_log and scr.raw_chunks is not None:
-        out_log = Path(args.out_log)
-        out_log.parent.mkdir(parents=True, exist_ok=True)
-        out_log.write_bytes(bytes(scr.raw_chunks))
-
-    if args.out_json:
-        out_json = Path(args.out_json)
-        out_json.parent.mkdir(parents=True, exist_ok=True)
-        out_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        raise
+    finally:
+        summary["validator"] = scr.validator.summary() if scr.validator else {}
+        _persist_outputs(args.out_log, args.out_json, scr, summary)
 
     return 0
 
