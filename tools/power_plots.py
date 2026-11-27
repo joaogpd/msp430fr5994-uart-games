@@ -133,7 +133,7 @@ def parse_energytrace_csv(csv_path: Path) -> EnergyTraceData:
                 "Export **Raw Data** CSV ('Time (ns),Current (nA),Voltage (mV),Energy (uJ)') instead."
             )
 
-        idx_time = idx_curr = idx_volt = idx_ener = idx_pwr = None
+        idx_time = idx_curr = idx_volt = idx_ener = idx_pwr = idx_dsr = None
         time_scale = 1e-9
         curr_scale = 1e-3
         volt_scale = 1e-3
@@ -144,6 +144,8 @@ def parse_energytrace_csv(csv_path: Path) -> EnergyTraceData:
         for i, (name, unit) in enumerate(parsed_cols):
             if name == "dsr":
                 has_dsr = True
+                if idx_dsr is None:
+                    idx_dsr = i
             elif name == "time" and idx_time is None:
                 idx_time = i
                 if unit:
@@ -198,30 +200,63 @@ def parse_energytrace_csv(csv_path: Path) -> EnergyTraceData:
                 stacklevel=2,
             )
 
+        present_indices = [
+            idx for idx in (idx_time, idx_curr, idx_volt, idx_ener, idx_pwr, idx_dsr) if idx is not None
+        ]
+        min_row_len = max(present_indices) + 1
+
         t_vals: List[float] = []
         i_vals: List[float] = []
         v_vals: List[float] = []
         e_vals: List[float] = []
+        p_vals: List[float] = []
+        e_valid_vals: List[bool] = []
+        p_valid_vals: List[bool] = []
+        skipped_incomplete = 0
 
         for row in reader:
-            if not row or len(row) <= max(idx_time, idx_curr):
+            if not row:
+                continue
+            if len(row) < min_row_len:
+                skipped_incomplete += 1
                 continue
             try:
                 t_s = float(row[idx_time]) * time_scale
                 i_ua = float(row[idx_curr]) * curr_scale
-                v_v = (float(row[idx_volt]) * volt_scale) if idx_volt is not None and row[idx_volt].strip() else 3.3
-                if idx_ener is not None and row[idx_ener].strip():
+                v_v = (
+                    float(row[idx_volt]) * volt_scale
+                    if (idx_volt is not None and idx_volt < len(row) and row[idx_volt].strip())
+                    else 3.3
+                )
+                if idx_ener is not None and idx_ener < len(row) and row[idx_ener].strip():
                     e_mj = float(row[idx_ener]) * ener_scale
-                elif idx_pwr is not None and row[idx_pwr].strip():
-                    e_mj = 0.0  # Will integrate below if Energy missing
+                    has_row_e = True
                 else:
                     e_mj = 0.0
+                    has_row_e = False
+
+                if idx_pwr is not None and idx_pwr < len(row) and row[idx_pwr].strip():
+                    p_uw = float(row[idx_pwr]) * pwr_scale
+                    has_row_p = True
+                else:
+                    p_uw = 0.0
+                    has_row_p = False
             except ValueError:
                 continue
             t_vals.append(t_s)
             i_vals.append(i_ua)
             v_vals.append(v_v)
             e_vals.append(e_mj)
+            p_vals.append(p_uw)
+            e_valid_vals.append(has_row_e)
+            p_valid_vals.append(has_row_p)
+
+    if skipped_incomplete > 0:
+        warnings.warn(
+            f"{csv_path.name}: Skipped {skipped_incomplete} incomplete/ragged CSV row(s).",
+            UserWarning,
+            stacklevel=2,
+        )
 
     if len(t_vals) < 2:
         raise ValueError(f"{csv_path}: Need at least 2 valid data rows, found {len(t_vals)}")
@@ -230,6 +265,9 @@ def parse_energytrace_csv(csv_path: Path) -> EnergyTraceData:
     i_arr = np.asarray(i_vals, dtype=np.float64)
     v_arr = np.asarray(v_vals, dtype=np.float64)
     e_arr = np.asarray(e_vals, dtype=np.float64)
+    p_arr = np.asarray(p_vals, dtype=np.float64)
+    e_valid_arr = np.asarray(e_valid_vals, dtype=bool)
+    p_valid_arr = np.asarray(p_valid_vals, dtype=bool)
 
     # Filter strictly monotonic increasing timestamps and shift t[0] -> 0
     keep = np.ones(len(t_arr), dtype=bool)
@@ -244,14 +282,21 @@ def parse_energytrace_csv(csv_path: Path) -> EnergyTraceData:
     i_arr = i_arr[keep]
     v_arr = v_arr[keep]
     e_arr = e_arr[keep]
+    p_arr = p_arr[keep]
+    e_valid_arr = e_valid_arr[keep]
+    p_valid_arr = p_valid_arr[keep]
 
     if len(t_arr) < 2 or t_arr[-1] <= 0.0:
         raise ValueError(f"{csv_path}: Non-positive capture duration after monotonic filtering")
 
-    has_energy = idx_ener is not None
+    has_energy = (idx_ener is not None) and bool(np.any(e_valid_arr))
     if not has_energy:
-        # Cumulative trapezoidal integral of V(t)*I(t) -> mJ
-        p_mw = v_arr * (i_arr * 1e-3)
+        if idx_pwr is not None and bool(np.all(p_valid_arr)):
+            # Cumulative trapezoidal integral of Power(t) -> mJ (total equals _trapz(p_uw, t_s) * 1e-3)
+            p_mw = p_arr * 1e-3
+        else:
+            # Cumulative trapezoidal integral of V(t)*I(t) -> mJ
+            p_mw = v_arr * (i_arr * 1e-3)
         dt = np.diff(t_arr)
         de = 0.5 * (p_mw[:-1] + p_mw[1:]) * dt
         e_arr = np.concatenate(([0.0], np.cumsum(de)))
@@ -312,11 +357,12 @@ def compute_trace_stats(trace: EnergyTraceData) -> TraceStats:
 
     p_inst_uW = v * i_ua
     vi_mean_power_uW = float(_trapz(p_inst_uW, t)) / duration_s
-    discrepancy_pct = (
-        abs(mean_power_uW - vi_mean_power_uW) / abs(mean_power_uW) * 100.0
-        if abs(mean_power_uW) > 1e-12
-        else 0.0
-    )
+    if abs(mean_power_uW) > 1e-12:
+        discrepancy_pct = abs(mean_power_uW - vi_mean_power_uW) / abs(mean_power_uW) * 100.0
+    elif abs(vi_mean_power_uW) > 1e-12:
+        discrepancy_pct = 100.0
+    else:
+        discrepancy_pct = 0.0
 
     mean_voltage_V = float(_trapz(v, t)) / duration_s
     tw_mean_current_uA = float(_trapz(i_ua, t)) / duration_s
@@ -871,6 +917,69 @@ def run_self_test() -> None:
             assert fp.exists(), f"Missing figure {fp}"
             raw = fp.read_bytes()
             assert len(raw) > 5000 and raw[:8] == b"\x89PNG\r\n\x1a\n", f"Invalid PNG {fp}"
+
+        # 5. Ragged CSV row regression test (must skip incomplete row safely without IndexError)
+        ragged_csv = tmp_path / "ragged.csv"
+        ragged_csv.write_text(
+            "Time (s),Current (uA),Voltage (V),Energy (mJ)\n"
+            "0.0,100.0,3.3,0.0\n"
+            "15.0,100.0\n"
+            "30.0,100.0,3.3,9.9\n",
+            encoding="utf-8",
+        )
+        with warnings.catch_warnings(record=True) as caught_rag:
+            warnings.simplefilter("always")
+            tr_rag = parse_energytrace_csv(ragged_csv)
+        assert len(tr_rag.time_s) == 2
+        assert any("ragged" in str(w.message).lower() or "incomplete" in str(w.message).lower() for w in caught_rag)
+        st_rag = compute_trace_stats(tr_rag)
+        assert abs(st_rag.total_energy_mJ - 9.9) < 1e-6
+
+        # 6. Power (uW)/(mW) integration when Voltage & Energy are absent or Energy is empty
+        pwr_uw_csv = tmp_path / "pwr_uw.csv"
+        pwr_uw_csv.write_text(
+            "Time (s),Current (uA),Power (uW)\n"
+            "0.0,100.0,300.0\n"
+            "30.0,100.0,300.0\n",
+            encoding="utf-8",
+        )
+        st_pwr_uw = compute_trace_stats(parse_energytrace_csv(pwr_uw_csv))
+        assert abs(st_pwr_uw.mean_power_uW - 300.0) < 1e-6, st_pwr_uw
+        assert abs(st_pwr_uw.total_energy_mJ - 9.0) < 1e-6, st_pwr_uw
+
+        pwr_mw_empty_e_csv = tmp_path / "pwr_mw_empty_e.csv"
+        pwr_mw_empty_e_csv.write_text(
+            "Time (s),Current (uA),Energy (mJ),Power (mW)\n"
+            "0.0,100.0,,0.3\n"
+            "30.0,100.0,,0.3\n",
+            encoding="utf-8",
+        )
+        st_pwr_mw = compute_trace_stats(parse_energytrace_csv(pwr_mw_empty_e_csv))
+        assert abs(st_pwr_mw.mean_power_uW - 300.0) < 1e-6, st_pwr_mw
+
+        # 7. Zero-energy nonzero-VI discrepancy regression test
+        zero_e_csv = tmp_path / "zero_e_nonzero_vi.csv"
+        zero_e_csv.write_text(
+            "Time (s),Current (uA),Voltage (V),Energy (mJ)\n"
+            "0.0,100.0,3.3,0.0\n"
+            "15.0,100.0,3.3,4.95\n"
+            "30.0,100.0,3.3,\n",
+            encoding="utf-8",
+        )
+        st_zero_e = compute_trace_stats(parse_energytrace_csv(zero_e_csv))
+        assert abs(st_zero_e.mean_power_uW) <= 1e-12
+        assert abs(st_zero_e.vi_mean_power_uW - 330.0) < 1e-6
+        assert abs(st_zero_e.power_discrepancy_pct - 100.0) < 1e-6, st_zero_e
+
+        both_zero_csv = tmp_path / "both_zero.csv"
+        both_zero_csv.write_text(
+            "Time (s),Current (uA),Voltage (V),Energy (mJ)\n"
+            "0.0,0.0,0.0,0.0\n"
+            "30.0,0.0,0.0,0.0\n",
+            encoding="utf-8",
+        )
+        st_both_zero = compute_trace_stats(parse_energytrace_csv(both_zero_csv))
+        assert st_both_zero.power_discrepancy_pct == 0.0, st_both_zero
 
     print("[SELF-TEST] All power_plots.py offline checks PASSED.", flush=True)
 
