@@ -6,6 +6,7 @@
 #include "drivers/board/board.h"
 #include "drivers/msp430/cs.h"
 #include "drivers/msp430/gpio.h"
+#include "drivers/msp430/pmm.h"
 #include "drivers/msp430/timer.h"
 #include "drivers/msp430/uart.h"
 #include "app/dungeon_game.h"
@@ -65,11 +66,15 @@ int main(void)
     {
         dungeon_game_process();
 
-        /* Sleep in LPM0 (SMCLK stays available for UART TX/RX) until next event */
+        /* Flush UART TX in LPM0 (avoids PMM31), then sleep in LPM3 when idle */
+        if (!dungeon_game_has_pending_work() && !uart_tx_idle(UART_A0))
+        {
+            (void)uart_flush(UART_A0);
+        }
         __disable_interrupt();
         if (!dungeon_game_has_pending_work())
         {
-            __bis_SR_register(LPM0_bits | GIE);
+            pmm_enter_lpm(uart_tx_idle(UART_A0) ? PMM_LPM3 : PMM_LPM0);
         }
         else
         {

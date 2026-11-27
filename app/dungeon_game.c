@@ -8,6 +8,7 @@
 #include <string.h>
 
 #define DEBOUNCE_PERIOD_MS  20u
+#define LOW_HP_LED_PULSE_MS 25u
 #define HOLD_TICKS_1S       40u     /* 40 * 20 ms = 0.8 s */
 #define CMD_QUEUE_SIZE      16u     /* Power-of-2 RX/button command ring buffer */
 #define CMD_QUEUE_MASK      (CMD_QUEUE_SIZE - 1u)
@@ -192,7 +193,9 @@ static uint8_t       s_shop_preview = 255u;
 static bool          s_low_hp_pulse = false;
 static bool          s_was_low_hp = false;
 static uint8_t       s_low_hp_beep_ticks = 0u;
+static bool          s_pulse_only_dirty = false;
 static uint16_t      s_rng = 0x5D17u;
+static uint16_t      s_entropy = 0xA53Cu;
 static char          s_status_msg[STATUS_LEN + 1u];
 static uint8_t       s_status_ttl = 0u;
 
@@ -224,6 +227,12 @@ static uint16_t next_rand(void)
     return s_rng;
 }
 
+static void mix_entropy(uint16_t val)
+{
+    s_entropy ^= val;
+    s_entropy = (uint16_t)((s_entropy << 5) | (s_entropy >> 11)) ^ 0x9E37u;
+}
+
 static uint8_t u8_abs_diff(uint8_t a, uint8_t b)
 {
     return (a > b) ? (uint8_t)(a - b) : (uint8_t)(b - a);
@@ -253,6 +262,29 @@ static bool is_low_hp(void)
 {
     return (!s_game_over && s_hp > 0u &&
             (s_hp <= 3u || (uint16_t)((uint16_t)s_hp * 4u) <= (uint16_t)s_max_hp));
+}
+
+static bool on_led_off_timer(timer_id_t id)
+{
+    (void)id;
+    if (!s_game_over)
+    {
+        board_led1(false);
+    }
+    return false; /* Keep CPU in LPM3 without waking main() */
+}
+
+static void led1_set_solid(bool on)
+{
+    timer_stop(TIMER_A2);
+    board_led1(on);
+}
+
+static void led1_trigger_pulse(void)
+{
+    if (s_game_over) { return; }
+    board_led1(true);
+    (void)timer_start_oneshot_ms(TIMER_A2, LOW_HP_LED_PULSE_MS, on_led_off_timer);
 }
 
 static uint8_t enemy_freeze_turns(const dng_enemy_t *e)
@@ -607,7 +639,11 @@ static bool load_checkpoint(bool restore_full_run)
         memcpy(s_enemies, s_ckpt_stage.enemies, sizeof(s_enemies));
         compute_los();
         update_camera(true);
-        board_led1(false);
+        led1_set_solid(false);
+        if (s_was_low_hp)
+        {
+            led1_trigger_pulse();
+        }
         board_led2(false);
         set_status("RESTORED CHECKPOINT FROM FRAM!");
         s_full_redraw = true;
@@ -1040,8 +1076,10 @@ static void generate_floor(void)
 static void start_new_run_with_class(uint8_t cls)
 {
     s_class     = (cls < 3u) ? cls : CLASS_KNIGHT;
-    /* Mix free-running ACLK Timer_A1 counter for real per-run seed variety */
-    s_rng      ^= (uint16_t)TA1R;
+    /* Mix event-timing + Timer_A1 entropy for real per-run seed variety */
+    mix_entropy((uint16_t)TA1R ^ (uint16_t)TA0R);
+    s_rng      ^= (uint16_t)TA1R ^ s_entropy;
+    if (s_rng == 0u) { s_rng = 0x5D17u; }
     s_run_seed  = next_rand();
     if (s_run_seed == 0u) { s_run_seed = 0x5D17u; }
     s_rng       = s_run_seed;
@@ -1077,7 +1115,7 @@ static void start_new_run_with_class(uint8_t cls)
         s_atk = 2u; s_def = 0u; s_potions = 1u; s_bombs = 1u; s_scrolls = 1u;
     }
 
-    board_led1(false);
+    led1_set_solid(false);
     board_led2(false);
     generate_floor();
     set_status("ADVENTURE BEGINS! PRESS ? FOR HELP, M FOR MAP, H FOR HALL OF FAME.");
@@ -1093,7 +1131,7 @@ static void start_new_run(void)
     s_map_mode     = false;
     s_help_mode    = false;
     s_hof_mode     = false;
-    board_led1(false);
+    led1_set_solid(false);
     board_led2(false);
     s_full_redraw  = true;
     s_dirty        = true;
@@ -1108,6 +1146,37 @@ static void start_ai_demo(void)
     memset(s_ai_hx, 0xFF, sizeof(s_ai_hx));
     memset(s_ai_hy, 0xFF, sizeof(s_ai_hy));
     set_status("AI DEMO (FRAM Q7 HEURISTIC) ACTIVE! T:SWITCH HEUR/MLP  N:EXIT");
+}
+
+static bool need_probe_timer(void)
+{
+    bool need_dsr    = !s_terminal_connected;
+    bool need_ai     = s_ai_demo && !s_game_over && !s_class_select &&
+                       !s_map_mode && !s_help_mode && !s_hof_mode;
+    bool need_low_hp = !s_class_select && is_low_hp();
+    return need_dsr || need_ai || need_low_hp;
+}
+
+static void sync_probe_timer(void)
+{
+    if (need_probe_timer())
+    {
+        if (!timer_running(TIMER_A1))
+        {
+            (void)timer_start_periodic_ms(TIMER_A1, 500u, dungeon_game_on_probe_timer);
+        }
+    }
+    else
+    {
+        if (timer_running(TIMER_A1))
+        {
+            mix_entropy((uint16_t)TA1R);
+            timer_stop(TIMER_A1);
+        }
+        uint16_t sr = hal_enter_critical();
+        s_probe_due = false;
+        hal_exit_critical(sr);
+    }
 }
 
 void dungeon_game_init(void)
@@ -1152,6 +1221,7 @@ void dungeon_game_init(void)
     {
         start_new_run();
     }
+    sync_probe_timer();
 }
 
 bool dungeon_game_push_input(uint8_t cmd)
@@ -1301,7 +1371,7 @@ static void damage_player(uint8_t raw_dmg, const char *source_name)
                 s_was_low_hp = true;
                 s_low_hp_pulse = true;
                 s_low_hp_beep_ticks = 0u;
-                board_led1(true);
+                led1_trigger_pulse();
                 s_full_redraw = true;
             }
             if (s_terminal_connected)
@@ -1317,7 +1387,7 @@ static void damage_player(uint8_t raw_dmg, const char *source_name)
         s_game_over = true;
         s_was_low_hp = false;
         s_low_hp_pulse = false;
-        board_led1(true);
+        led1_set_solid(true);
         if (!s_ai_demo)
         {
             record_hall_of_fame();
@@ -1380,7 +1450,7 @@ static void damage_enemy(uint8_t idx, uint8_t dmg, bool by_bolt)
             {
                 s_was_low_hp = false;
                 s_low_hp_pulse = false;
-                board_led1(false);
+                led1_set_solid(false);
                 s_full_redraw = true;
             }
         }
@@ -1805,7 +1875,7 @@ static void use_potion(void)
     {
         s_was_low_hp = false;
         s_low_hp_pulse = false;
-        board_led1(false);
+        led1_set_solid(false);
         s_full_redraw = true;
     }
     set_status("DRANK HEALTH POTION (+6 HP)!");
@@ -1962,7 +2032,8 @@ static void activate_shrine(uint8_t x, uint8_t y)
             {
                 s_was_low_hp = true;
                 s_low_hp_pulse = true;
-                board_led1(true);
+                s_low_hp_beep_ticks = 0u;
+                led1_trigger_pulse();
                 s_full_redraw = true;
             }
             set_status("BLOOD ALTAR: SACRIFICED 3 HP FOR +1 ATK!");
@@ -1983,7 +2054,7 @@ static void activate_shrine(uint8_t x, uint8_t y)
             {
                 s_was_low_hp = false;
                 s_low_hp_pulse = false;
-                board_led1(false);
+                led1_set_solid(false);
                 s_full_redraw = true;
             }
             set_status("AEGIS FONT: FULLY RESTORED YOUR HP!");
@@ -2108,7 +2179,7 @@ static void step_in_direction(uint8_t dir)
             {
                 s_was_low_hp = false;
                 s_low_hp_pulse = false;
-                board_led1(false);
+                led1_set_solid(false);
                 s_full_redraw = true;
             }
             set_status("BELT FULL - DRANK HEALTH POTION (+6 HP)!");
@@ -2127,6 +2198,13 @@ static void step_in_direction(uint8_t dir)
         s_gold = (uint16_t)(s_gold + 25u);
         s_max_hp++;
         s_hp++;
+        if (!is_low_hp() && s_was_low_hp)
+        {
+            s_was_low_hp = false;
+            s_low_hp_pulse = false;
+            led1_set_solid(false);
+            s_full_redraw = true;
+        }
         uint8_t bonus = (uint8_t)(next_rand() & 0x03u);
         if (bonus == 0u)
         {
@@ -2864,6 +2942,8 @@ static void render_if_dirty(void)
     {
         return;
     }
+    bool pulse_only = s_pulse_only_dirty;
+    s_pulse_only_dirty = false;
     s_dirty = false;
 
     if (s_hof_mode)
@@ -2890,6 +2970,20 @@ static void render_if_dirty(void)
     if (s_map_mode)
     {
         render_full_map_overlay(frame, &pos, cap);
+        if (pos > 0u) { uart_write_all(UART_A0, frame, pos); }
+        return;
+    }
+
+    if (pulse_only && !s_full_redraw && is_low_hp())
+    {
+        pos = buf_puts(frame, pos, cap, "\x1b[?25l");
+        render_top_banner(frame, &pos, cap);
+        pos = buf_put_cup(frame, pos, cap, 2u, 58u);
+        pos = buf_puts(frame, pos, cap, s_low_hp_pulse ? "\x1b[1;37;41m!HP:" : "\x1b[1;31m!HP:");
+        pos = buf_put_u8_pad2(frame, pos, cap, s_hp);
+        pos = buf_puts(frame, pos, cap, "/");
+        pos = buf_put_u8_pad2(frame, pos, cap, s_max_hp);
+        pos = buf_puts(frame, pos, cap, "\x1b[0m");
         if (pos > 0u) { uart_write_all(UART_A0, frame, pos); }
         return;
     }
@@ -3379,7 +3473,7 @@ static uint8_t ga_select_action_q7(void)
             int32_t sc = 0;
             for (i = 0u; i < GA_HEUR_NUM_FEATURES; i++)
             {
-                sc += (int32_t)f[i] * (int32_t)GA_HEUR_WEIGHTS[i];
+                sc += (int32_t)((int16_t)f[i] * (int16_t)GA_HEUR_WEIGHTS[i]);
             }
             if (sc > best_score) { best_score = sc; best_a = a; }
         }
@@ -3442,7 +3536,7 @@ static uint8_t ga_select_action_q7(void)
             uint8_t j;
             for (j = 0u; j < GA_MLP_IN; j++)
             {
-                acc += (int32_t)GA_MLP_W1[i][j] * (int32_t)x[j];
+                acc += (int32_t)((int16_t)GA_MLP_W1[i][j] * (int16_t)x[j]);
             }
             if (acc <= 0) { h[i] = 0; }
             else
@@ -3458,7 +3552,7 @@ static uint8_t ga_select_action_q7(void)
             int32_t acc = (int32_t)GA_MLP_B2[a] << 7;
             for (i = 0u; i < GA_MLP_HIDDEN; i++)
             {
-                acc += (int32_t)GA_MLP_W2[a][i] * (int32_t)h[i];
+                acc += (int32_t)((int16_t)GA_MLP_W2[a][i] * (int16_t)h[i]);
             }
             if (acc > best_score) { best_score = acc; best_a = a; }
         }
@@ -3493,6 +3587,7 @@ static void handle_command_ex(uint8_t cmd, bool from_ai)
         {
             s_terminal_connected = true;
             s_full_redraw = true;
+            s_dirty = true;
         }
         s_missed_probes = 0u;
     }
@@ -3743,6 +3838,7 @@ void dungeon_game_process(void)
 
     while (pop_cmd(&b))
     {
+        mix_entropy(((uint16_t)b << 8) ^ (uint16_t)TA1R ^ (uint16_t)TA0R);
         if (s_esc_state == 1u)
         {
             if (b == '[')
@@ -3800,14 +3896,18 @@ void dungeon_game_process(void)
             handle_command_ex(ai_act, true);
         }
 
-        /* Low-HP heartbeat: blink Red LED1 + pulse red banner every 500 ms, beep BEL every 2.0 s */
+        /* Low-HP heartbeat: 25 ms Red LED1 pulse + pulse red banner every 500 ms, beep BEL every 2.0 s */
         if (!s_class_select && is_low_hp())
         {
             s_was_low_hp = true;
             s_low_hp_pulse = !s_low_hp_pulse;
-            board_led1(s_low_hp_pulse);
+            led1_trigger_pulse();
             if (s_terminal_connected && !s_map_mode && !s_help_mode && !s_hof_mode)
             {
+                if (!s_dirty)
+                {
+                    s_pulse_only_dirty = true;
+                }
                 s_dirty = true;
             }
             s_low_hp_beep_ticks++;
@@ -3827,14 +3927,14 @@ void dungeon_game_process(void)
             {
                 s_low_hp_pulse = false;
                 s_was_low_hp   = false;
-                board_led1(false);
+                led1_set_solid(false);
                 s_full_redraw = true;
                 s_dirty = true;
             }
             s_low_hp_beep_ticks = 0u;
         }
 
-        if (!was_dirty && uart_tx_idle(UART_A0))
+        if (!s_terminal_connected && !was_dirty && uart_tx_idle(UART_A0))
         {
             if (s_missed_probes < 3u)
             {
@@ -3850,4 +3950,5 @@ void dungeon_game_process(void)
     }
 
     render_if_dirty();
+    sync_probe_timer();
 }
