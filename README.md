@@ -66,3 +66,7 @@ You can also invoke [tools/launch_terminal.ps1](tools/launch_terminal.ps1) direc
 3. Build and flash `mspgame`.
 4. Run `.\play.bat`. If using another serial terminal manually on **MSP Application UART1**, set **`115200` baud**, `8N1`, flow control `None`, and local echo `Off`.
 5. See [docs/HOW_TO_PLAY.md](docs/HOW_TO_PLAY.md) for full gameplay controls, spells, relics, FRAM saves, and the on-chip `[4] AI DEMO`.
+
+## AI Usage & Assistance Disclaimer
+
+This repository and its accompanying engineering reports were directed, architected, and supervised by the human author (`joaogpd`). AI coding and research assistants were used transparently as engineering aids during development to assist with: firmware feature and low-power optimization implementation, the headless Python simulator and genetic algorithm pipeline (`ga/`), EnergyTrace benchmarking and analysis scripts (`tools/`), automated testing (`tests/`), and drafting documentation and LaTeX/Markdown reports (`docs/`). All architectural decisions, physical MSP-EXP430FR5994 LaunchPad hardware validation, and verification of empirical results were performed under the human author's supervision.
