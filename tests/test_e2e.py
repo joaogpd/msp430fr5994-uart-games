@@ -1527,6 +1527,7 @@ class LiveHardwareE2ETests(unittest.TestCase):
         fb0 = len(self.sess.scr.frame_timestamps)
         self.sess.send(b"\r")
         self.assertTrue(self.sess.wait_until(lambda: len(self.sess.scr.frame_timestamps) > fb0 and self.sess.scr.is_frame_complete()))
+        self.sess.drain_frame()
         after = self.sess.scr.parse_hud()
         self.assertEqual((after["hp"], after["mp"], after["px"], after["py"]), (before["hp"], before["mp"], before["px"], before["py"]))
 
@@ -1536,6 +1537,7 @@ class LiveHardwareE2ETests(unittest.TestCase):
         fb0 = len(self.sess.scr.frame_timestamps)
         self.sess.send(b"l")
         self.assertTrue(self.sess.wait_until(lambda: len(self.sess.scr.frame_timestamps) > fb0 and self.sess.scr.is_frame_complete()))
+        self.sess.drain_frame()
         after = self.sess.scr.parse_hud()
         self.assertEqual((after["hp"], after["mp"], after["px"], after["py"]), (before["hp"], before["mp"], before["px"], before["py"]))
 
@@ -1578,8 +1580,10 @@ class LiveHardwareE2ETests(unittest.TestCase):
         before = self._start_class(b"1")
         self.sess.send(b"?")
         self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() == "help_overlay"))
+        self.sess.drain_frame()
         self.sess.send(b" ")
         self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() in ("human_play", "low_hp") and self.sess.scr.is_frame_complete()))
+        self.sess.drain_frame()
         after = self.sess.scr.parse_hud()
         self.assertEqual((after["hp"], after["mp"], after["px"], after["py"]), (before["hp"], before["mp"], before["px"], before["py"]))
 
@@ -1588,8 +1592,10 @@ class LiveHardwareE2ETests(unittest.TestCase):
         before = self._start_class(b"1")
         self.sess.send(b"m")
         self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() == "map_overlay"))
+        self.sess.drain_frame()
         self.sess.send(b" ")
         self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() in ("human_play", "low_hp") and self.sess.scr.is_frame_complete()))
+        self.sess.drain_frame()
         after = self.sess.scr.parse_hud()
         self.assertEqual((after["hp"], after["mp"], after["px"], after["py"]), (before["hp"], before["mp"], before["px"], before["py"]))
 
@@ -1597,13 +1603,17 @@ class LiveHardwareE2ETests(unittest.TestCase):
         assert self.sess is not None
         self.sess.send(b"h")
         self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() == "hof_overlay"))
+        self.sess.drain_frame()
         self.sess.send(b" ")
         self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() == "class_select"))
+        self.sess.drain_frame()
         self._start_class(b"1")
         self.sess.send(b"h")
         self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() == "hof_overlay"))
+        self.sess.drain_frame()
         self.sess.send(b" ")
-        self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() in ("human_play", "low_hp")))
+        self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() in ("human_play", "low_hp") and self.sess.scr.is_frame_complete()))
+        self.sess.drain_frame()
 
     def test_t1_fa3_01_knight_spawn_stats(self) -> None:
         assert self.sess is not None
@@ -1769,8 +1779,10 @@ class LiveHardwareE2ETests(unittest.TestCase):
             self.assertTrue(self.sess.wait_until(lambda: self.sess.scr.detect_state() == "class_select"))
 
     def test_t1_fa6_06_power_bench_verify_uart_subprocess_com4(self) -> None:
-        assert self.sess is not None
-        self.sess.close()
+        cls = type(self)
+        assert cls.sess is not None
+        cls.sess.close()
+        cls.sess = None
         try:
             proc = subprocess.run(
                 [sys.executable, str(POWER_BENCH_PY), "--port", LIVE_PORT, "--verify-uart"],
@@ -1780,7 +1792,7 @@ class LiveHardwareE2ETests(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         finally:
-            self.sess = UartSession(LIVE_PORT, 115200)
+            cls.sess = UartSession(LIVE_PORT, 115200)
 
     # --- Tier 2: FA1..FA5 Live Boundary Tests ---
 
@@ -1835,6 +1847,12 @@ class LiveHardwareE2ETests(unittest.TestCase):
         self._start_class(b"1")
         for seq in (b"??", b"mm", b"hh"):
             self.sess.send(seq)
+            self.assertTrue(
+                self.sess.wait_until(
+                    lambda: self.sess.scr.detect_state() in ("human_play", "low_hp")
+                    and self.sess.scr.is_frame_complete()
+                )
+            )
             self.sess.drain_frame()
             self.assertIn(self.sess.scr.detect_state(), ("human_play", "low_hp"))
 
@@ -2020,8 +2038,10 @@ class LiveHardwareE2ETests(unittest.TestCase):
         self.assertEqual(self.sess.scr.validator.errors, [])
 
     def test_t4_03_power_bench_cli_verify_uart_and_all_profiles_com4(self) -> None:
-        assert self.sess is not None
-        self.sess.close()
+        cls = type(self)
+        assert cls.sess is not None
+        cls.sess.close()
+        cls.sess = None
         try:
             with tempfile.TemporaryDirectory() as td:
                 root = Path(td)
@@ -2059,7 +2079,7 @@ class LiveHardwareE2ETests(unittest.TestCase):
                 data = json.loads(out_json.read_text(encoding="utf-8"))
                 self.assertEqual(len(data["profiles"]), 5)
         finally:
-            self.sess = UartSession(LIVE_PORT, 115200)
+            cls.sess = UartSession(LIVE_PORT, 115200)
 
 
 # ---------------------------------------------------------------------------
@@ -2110,8 +2130,34 @@ class FinalDeliverablesE2ETests(unittest.TestCase):
                 allow_partial=False,
             )
             deltas = payload["deltas"]  # type: ignore[assignment]
-            for prof in ("idle", "ai_heuristic", "ai_mlp", "low_hp"):
+            for prof in ("idle", "play", "ai_mlp", "low_hp"):
                 self.assertGreater(deltas[prof]["delta_mean_power_pct"], 0.0)
+
+            # Verify optimized_ai_heuristic validity, LPM1 sleep floor (<100 uA), peak reduction,
+            # and strictly lower mean power/current vs the active Baseline AI window (0..3 s of baseline_ai_mlp.csv;
+            # baseline_ai_heuristic.csv itself sat in 191 uA idle for 0..27 s).
+            opt_heur = payload["profiles"]["ai_heuristic"]["optimized"]  # type: ignore[index]
+            base_heur = payload["profiles"]["ai_heuristic"]["baseline"]  # type: ignore[index]
+            self.assertGreater(opt_heur["total_energy_mJ"], 0.0)
+            self.assertGreater(opt_heur["mean_power_uW"], 0.0)
+            self.assertLess(opt_heur["max_current_uA"], base_heur["max_current_uA"])
+
+            tr_opt_heur = power_plots.parse_energytrace_csv(POWER_DATA_DIR / "optimized_ai_heuristic.csv")
+            nz_heur = sorted(float(v) for v in tr_opt_heur.current_uA if v > 0.0)
+            self.assertGreater(len(nz_heur), 100)
+            lpm1_floor_p05_ua = nz_heur[max(0, len(nz_heur) // 20)]
+            self.assertLess(lpm1_floor_p05_ua, 100.0)
+
+            tr_base_mlp = power_plots.parse_energytrace_csv(POWER_DATA_DIR / "baseline_ai_mlp.csv")
+            mask_active = (tr_base_mlp.time_s >= 0.0) & (tr_base_mlp.time_s <= 3.0)
+            t_act = tr_base_mlp.time_s[mask_active]
+            e_act = tr_base_mlp.energy_mJ[mask_active]
+            v_act_mean = float(tr_base_mlp.voltage_V[mask_active].mean())
+            active_base_ai_power_uw = float((e_act[-1] - e_act[0]) * 1e3 / (t_act[-1] - t_act[0]))
+            active_base_ai_curr_ua = active_base_ai_power_uw / v_act_mean
+            self.assertLess(opt_heur["mean_power_uW"], active_base_ai_power_uw)
+            self.assertLess(opt_heur["ev_mean_current_uA"], active_base_ai_curr_ua)
+
             base_play = payload["profiles"]["play"]["baseline"]["mean_power_uW"]  # type: ignore[index]
             opt_play = payload["profiles"]["play"]["optimized"]["mean_power_uW"]  # type: ignore[index]
             self.assertLessEqual(opt_play, base_play * 1.05)
