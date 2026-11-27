@@ -457,6 +457,8 @@ def compute_deltas(base: TraceStats, opt: TraceStats) -> Dict[str, float]:
     return {
         "delta_tw_current_uA": base.tw_mean_current_uA - opt.tw_mean_current_uA,
         "delta_tw_current_pct": pct(base.tw_mean_current_uA, opt.tw_mean_current_uA),
+        "delta_ev_current_uA": base.ev_mean_current_uA - opt.ev_mean_current_uA,
+        "delta_ev_current_pct": pct(base.ev_mean_current_uA, opt.ev_mean_current_uA),
         "delta_mean_power_uW": base.mean_power_uW - opt.mean_power_uW,
         "delta_mean_power_pct": pct(base.mean_power_uW, opt.mean_power_uW),
         "delta_energy_mJ": base.total_energy_mJ - opt.total_energy_mJ,
@@ -486,10 +488,91 @@ def _fmt_power_label(uw: float) -> str:
     return f"{uw:.1f} uW"
 
 
+def _compute_binned_ev_current(
+    tr: EnergyTraceData,
+    t_win: float,
+    bin_s: float = 0.025,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute binned energy-derived current I_ev = dE / (dt * V) over [0, t_win]."""
+    t_end = min(t_win, float(tr.time_s[-1]))
+    if t_end <= 0.0 or len(tr.time_s) < 2:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+    bins = np.arange(0.0, t_end + 1e-9, bin_s)
+    if len(bins) == 0 or bins[-1] < t_end - 1e-6:
+        bins = np.append(bins, t_end)
+    if len(bins) < 2:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+
+    e_bins = np.interp(bins, tr.time_s, tr.energy_mJ)
+    de_mj = np.diff(e_bins)
+    dt_s = np.diff(bins)
+    v_mid = np.interp(0.5 * (bins[:-1] + bins[1:]), tr.time_s, tr.voltage_V)
+    v_mid = np.where(v_mid > 0.1, v_mid, 3.3)
+    i_ev_ua = np.maximum((de_mj * 1e3) / (dt_s * v_mid), 0.0)
+    return bins, np.append(i_ev_ua, i_ev_ua[-1])
+
+
+def _detect_baseline_ai_artifact(
+    traces_map: Optional[Dict[str, Dict[str, EnergyTraceData]]],
+) -> Optional[Dict[str, object]]:
+    """Detect data-driven Baseline AI idle-window artifacts (never triggers on uniform synthetic data)."""
+    if not traces_map:
+        return None
+    b_mlp = traces_map.get("ai_mlp", {}).get("baseline")
+    if b_mlp is None or b_mlp.time_s[-1] < 10.0 or b_mlp.time_s[0] > 0.1:
+        return None
+
+    t_dur = float(b_mlp.time_s[-1] - b_mlp.time_s[0])
+    full_mlp_p_uw = ((float(b_mlp.energy_mJ[-1] - b_mlp.energy_mJ[0])) * 1e3) / max(t_dur, 1e-9)
+    e0, e3 = np.interp([0.0, 3.0], b_mlp.time_s, b_mlp.energy_mJ)
+    active_p_uw = ((float(e3 - e0)) * 1e3) / 3.0
+    m03 = (b_mlp.time_s >= 0.0) & (b_mlp.time_s <= 3.0)
+    v03 = float(np.mean(b_mlp.voltage_V[m03])) if np.any(m03) else 3.3
+    active_ev_ua = active_p_uw / max(v03, 0.1)
+
+    if active_p_uw <= full_mlp_p_uw * 1.45:
+        return None
+
+    # Count idle 1-s slices in [4, 29)
+    idle_secs = 0
+    max_s = min(29, int(b_mlp.time_s[-1]))
+    for sec in range(4, max_s):
+        es0, es1 = np.interp([float(sec), float(sec + 1)], b_mlp.time_s, b_mlp.energy_mJ)
+        if ((es1 - es0) * 1e3) < active_p_uw * 0.55:
+            idle_secs += 1
+
+    heur_idle_artifact = False
+    heur_floor_ua = 0.0
+    b_heur = traces_map.get("ai_heuristic", {}).get("baseline")
+    if b_heur is not None and b_heur.time_s[-1] >= 10.0:
+        t_h = min(27.0, float(b_heur.time_s[-1]))
+        eh0, eh1 = np.interp([0.0, t_h], b_heur.time_s, b_heur.energy_mJ)
+        p_0_27 = ((float(eh1 - eh0)) * 1e3) / max(t_h, 1e-9)
+        m5 = (b_heur.time_s >= 0.05) & (b_heur.time_s <= 5.0)
+        i5 = b_heur.current_uA[m5]
+        if len(i5) >= 2:
+            med5 = float(np.median(i5))
+            max5 = float(np.max(i5))
+            is_flat_5s = (med5 > 0.0) and ((max5 - med5) < 0.15 * med5)
+            if is_flat_5s and (p_0_27 < active_p_uw * 0.65):
+                heur_idle_artifact = True
+                heur_floor_ua = med5
+
+    return {
+        "active_ai_power_uw": active_p_uw,
+        "active_ai_ev_ua": active_ev_ua,
+        "mlp_idle_artifact": idle_secs >= 10,
+        "mlp_idle_secs": idle_secs,
+        "heur_idle_artifact": heur_idle_artifact,
+        "heur_floor_ua": heur_floor_ua,
+    }
+
+
 def _plot_power_comparison(
     stats_map: Dict[str, Dict[str, TraceStats]],
     deltas_map: Dict[str, Dict[str, float]],
     out_path: Path,
+    traces_map: Optional[Dict[str, Dict[str, EnergyTraceData]]] = None,
 ) -> None:
     _configure_matplotlib_style()
     profiles = [p for p, _ in CORE_PROFILES if p in stats_map]
@@ -501,8 +584,9 @@ def _plot_power_comparison(
 
     base_vals = [stats_map[p]["baseline"].mean_power_uW if "baseline" in stats_map[p] else np.nan for p in profiles]
     opt_vals = [stats_map[p]["optimized"].mean_power_uW if "optimized" in stats_map[p] else np.nan for p in profiles]
+    artifact = _detect_baseline_ai_artifact(traces_map)
 
-    fig, ax = plt.subplots(figsize=(7.16, 3.1), dpi=300)
+    fig, ax = plt.subplots(figsize=(7.16, 3.35), dpi=300)
     has_base = any(not np.isnan(v) for v in base_vals)
     has_opt = any(not np.isnan(v) for v in opt_vals)
 
@@ -523,10 +607,11 @@ def _plot_power_comparison(
                     _fmt_power_label(base_vals[idx]),
                     ha="center",
                     va="bottom",
-                    fontsize=6.5,
+                    fontsize=6.4,
                     color="#991b1b",
                 )
 
+    note_lines: List[str] = []
     if has_opt:
         bars_o = ax.bar(
             x + (width / 2 if has_base else 0.0),
@@ -542,28 +627,57 @@ def _plot_power_comparison(
                 lbl = _fmt_power_label(opt_vals[idx])
                 if p_key in deltas_map:
                     pct = deltas_map[p_key]["delta_mean_power_pct"]
-                    lbl = f"{lbl}\n({-pct:+.1f}%)"
+                    suffix = ""
+                    if artifact is not None:
+                        act_pw = float(artifact["active_ai_power_uw"])
+                        act_pct = (opt_vals[idx] - act_pw) / act_pw * 100.0
+                        if p_key == "ai_heuristic" and artifact["heur_idle_artifact"]:
+                            suffix = "*"
+                            note_lines.append(
+                                f"* Baseline Heuristic A sat idle 0-28 s (vs. {_fmt_power_label(act_pw)} "
+                                f"active Baseline AI [0-3 s]: {act_pct:+.1f}%)."
+                            )
+                        elif p_key == "ai_mlp" and artifact["mlp_idle_artifact"]:
+                            suffix = "**"
+                            note_lines.append(
+                                f"** Baseline Tiny-MLP B sat idle {int(artifact['mlp_idle_secs'])} s "
+                                f"(4-28 s; vs. {_fmt_power_label(act_pw)} active Baseline AI [0-3 s]: {act_pct:+.1f}%)."
+                            )
+                    lbl = f"{lbl}\n({-pct:+.1f}%{suffix})"
                 ax.text(
                     b.get_x() + b.get_width() / 2,
                     opt_vals[idx] * 1.12,
                     lbl,
                     ha="center",
                     va="bottom",
-                    fontsize=6.5,
+                    fontsize=6.4,
                     color="#1e3a8a",
                 )
 
     ax.set_yscale("log")
     all_pos = [v for v in base_vals + opt_vals if not np.isnan(v) and v > 0]
     if all_pos:
-        ax.set_ylim(min(all_pos) * 0.5, max(all_pos) * 3.2)
+        ax.set_ylim(min(all_pos) * 0.48, max(all_pos) * 3.8)
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylabel("Mean Power (uW, log scale)")
-    ax.set_title("MSP430FR5994 Power Comparison: Baseline vs. Optimized (30 s EnergyTrace)")
+    ax.set_title("MSP430FR5994 Mean Power Comparison: Baseline vs. Optimized (30 s EnergyTrace)")
     ax.grid(True, axis="y", which="both", alpha=0.25)
     ax.legend(frameon=False, loc="upper left")
-    fig.tight_layout()
+
+    if note_lines:
+        fig.text(
+            0.5,
+            0.015,
+            "\n".join(note_lines),
+            ha="center",
+            va="bottom",
+            fontsize=6.4,
+            color="#374151",
+        )
+        fig.tight_layout(rect=[0.0, 0.10, 1.0, 1.0])
+    else:
+        fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
 
@@ -573,7 +687,8 @@ def _plot_waveforms_idle_ai(
     out_path: Path,
 ) -> None:
     _configure_matplotlib_style()
-    fig, axes = plt.subplots(2, 1, figsize=(7.16, 3.8), dpi=300)
+    fig, axes = plt.subplots(2, 1, figsize=(7.16, 4.35), dpi=300)
+    artifact = _detect_baseline_ai_artifact(traces_map)
 
     panels = [
         ("idle", 10.0, "(a) Profile 1: Connected Terminal Idle (0-10 s Slice)", axes[0]),
@@ -582,24 +697,91 @@ def _plot_waveforms_idle_ai(
 
     for p_key, t_win, title, ax in panels:
         series = traces_map.get(p_key, {})
-        for variant, label, color, lw in (
-            ("baseline", "Baseline (5cf488d)", "#dc2626", 1.1),
-            ("optimized", "Optimized (Tier 1)", "#2563eb", 1.1),
-        ):
-            tr = series.get(variant)
-            if tr is None:
-                continue
-            mask = tr.time_s <= t_win
-            t_s = tr.time_s[mask]
-            i_ua = tr.current_uA[mask]
+        y_max = 0.0
+        b_tr = series.get("baseline")
+        o_tr = series.get("optimized")
+
+        if b_tr is not None:
+            mask = b_tr.time_s <= t_win
+            t_s = b_tr.time_s[mask]
+            i_ua = b_tr.current_uA[mask]
             if len(t_s) > 0:
-                ax.step(t_s, i_ua, where="post", label=label, color=color, linewidth=lw, alpha=0.9)
+                ax.step(t_s, i_ua, where="post", label="Baseline (5cf488d)", color="#dc2626", linewidth=1.0, alpha=0.88)
+                y_max = max(y_max, float(np.max(i_ua)))
+
+        if o_tr is not None:
+            mask = o_tr.time_s <= t_win
+            t_s = o_tr.time_s[mask]
+            i_ua = o_tr.current_uA[mask]
+            if len(t_s) > 0:
+                opt_lbl = "Optimized (I_tw trace)" if p_key == "ai_heuristic" else "Optimized (Tier 1)"
+                opt_alpha = 0.55 if p_key == "ai_heuristic" else 0.90
+                ax.step(t_s, i_ua, where="post", label=opt_lbl, color="#2563eb", linewidth=0.95, alpha=opt_alpha)
+                y_max = max(y_max, float(np.max(i_ua)))
+
+                if p_key == "ai_heuristic":
+                    ev_t, ev_i = _compute_binned_ev_current(o_tr, t_win, bin_s=0.025)
+                    if len(ev_t) > 0:
+                        ax.step(
+                            ev_t,
+                            ev_i,
+                            where="post",
+                            label="Optimized (25 ms I_ev)",
+                            color="#059669",
+                            linewidth=1.15,
+                            alpha=0.95,
+                        )
+                        y_max = max(y_max, float(np.max(ev_i)))
+
+        if p_key == "ai_heuristic" and artifact is not None and artifact["heur_idle_artifact"]:
+            act_ua = float(artifact["active_ai_ev_ua"])
+            floor_ua = float(artifact["heur_floor_ua"])
+            ax.axhline(
+                act_ua,
+                color="#991b1b",
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.85,
+                label=f"Baseline active AI [0-3 s] ({act_ua:.1f} uA)",
+            )
+            y_max = max(y_max, act_ua)
+            ax.text(
+                0.015,
+                0.96,
+                f"Baseline Heuristic trace idle 0-27 s (~{floor_ua:.0f} uA artifact);\n"
+                f"dashed ref = active 8 MHz Baseline AI [0-3 s] ({act_ua:.1f} uA)",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=6.3,
+                color="#7f1d1d",
+                bbox={"boxstyle": "round,pad=0.22", "facecolor": "#fef2f2", "edgecolor": "#fecaca", "alpha": 0.9},
+            )
+        elif p_key == "idle" and b_tr is not None and o_tr is not None:
+            b_st = compute_trace_stats(b_tr)
+            o_st = compute_trace_stats(o_tr)
+            red_pct = (1.0 - o_st.ev_mean_current_uA / max(b_st.ev_mean_current_uA, 1e-9)) * 100.0
+            ax.text(
+                0.015,
+                0.95,
+                f"Full 30 s I_ev: {b_st.ev_mean_current_uA:.1f} uA -> {o_st.ev_mean_current_uA:.1f} uA ({red_pct:.1f}% reduction)",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=6.5,
+                color="#1e3a8a",
+                bbox={"boxstyle": "round,pad=0.22", "facecolor": "#eff6ff", "edgecolor": "#bfdbfe", "alpha": 0.9},
+            )
+
         ax.set_title(title)
         ax.set_ylabel("Current (uA)")
         ax.set_xlim(0.0, t_win)
+        if y_max > 0.0:
+            ax.set_ylim(0.0, max(y_max * 1.42, 10.0))
         ax.grid(True, alpha=0.25)
         if series:
-            ax.legend(frameon=False, loc="upper right")
+            ncol = 2 if p_key == "ai_heuristic" else 2
+            ax.legend(frameon=False, loc="upper right", ncol=ncol, fontsize=6.6)
         else:
             ax.text(0.5, 0.5, "No capture data", transform=ax.transAxes, ha="center", va="center")
 
@@ -614,33 +796,88 @@ def _plot_waveform_low_hp(
     out_path: Path,
 ) -> None:
     _configure_matplotlib_style()
-    fig, ax = plt.subplots(figsize=(3.5, 2.5), dpi=300)
+    fig, ax = plt.subplots(figsize=(4.0, 3.1), dpi=300)
     series = traces_map.get("low_hp", {})
     t_win = 4.0
-    for variant, label, color in (
-        ("baseline", "Baseline (50% LED1)", "#dc2626"),
-        ("optimized", "Optimized (Pulse LED1)", "#2563eb"),
-    ):
-        tr = series.get(variant)
-        if tr is None:
-            continue
-        mask = tr.time_s <= t_win
+    y_max = 0.0
+
+    b_tr = series.get("baseline")
+    o_tr = series.get("optimized")
+
+    if b_tr is not None:
+        mask = b_tr.time_s <= t_win
+        i_ma = b_tr.current_uA[mask] / 1000.0
         ax.step(
-            tr.time_s[mask],
-            tr.current_uA[mask] / 1000.0,
+            b_tr.time_s[mask],
+            i_ma,
             where="post",
-            label=label,
-            color=color,
-            linewidth=1.1,
-            alpha=0.9,
+            label="Baseline (50% LED1)",
+            color="#dc2626",
+            linewidth=1.0,
+            alpha=0.82,
         )
+        if len(i_ma) > 0:
+            y_max = max(y_max, float(np.max(i_ma)))
+
+    if o_tr is not None:
+        mask = o_tr.time_s <= t_win
+        i_ma = o_tr.current_uA[mask] / 1000.0
+        ax.step(
+            o_tr.time_s[mask],
+            i_ma,
+            where="post",
+            label="Optimized (I_tw hold)",
+            color="#2563eb",
+            linewidth=0.9,
+            alpha=0.58,
+        )
+        if len(i_ma) > 0:
+            y_max = max(y_max, float(np.max(i_ma)))
+
+        ev_t, ev_i = _compute_binned_ev_current(o_tr, t_win, bin_s=0.025)
+        if len(ev_t) > 0:
+            ev_ma = ev_i / 1000.0
+            ax.step(
+                ev_t,
+                ev_ma,
+                where="post",
+                label="Optimized (25 ms I_ev)",
+                color="#059669",
+                linewidth=1.15,
+                alpha=0.95,
+            )
+            y_max = max(y_max, float(np.max(ev_ma)))
+
+    if b_tr is not None and o_tr is not None:
+        b_st = compute_trace_stats(b_tr)
+        o_st = compute_trace_stats(o_tr)
+        b_ev_ma = b_st.ev_mean_current_uA / 1000.0
+        o_ev_ma = o_st.ev_mean_current_uA / 1000.0
+        o_tw_ma = o_st.tw_mean_current_uA / 1000.0
+        ax.axhline(b_ev_ma, color="#991b1b", linestyle="--", linewidth=0.9, alpha=0.8, label=f"Base mean I_ev ({b_ev_ma:.2f} mA)")
+        ax.axhline(o_ev_ma, color="#047857", linestyle="--", linewidth=0.9, alpha=0.85, label=f"Opt mean I_ev ({o_ev_ma:.2f} mA)")
+        if o_st.power_discrepancy_pct > 25.0 and o_tr.has_energy_col:
+            ax.text(
+                0.985,
+                0.785,
+                f"25 ms LED1 pulse; ~100 ms filter hold\ninflates I_tw ({o_tw_ma:.2f} mA) vs I_ev ({o_ev_ma:.2f} mA)",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=5.8,
+                color="#1e3a8a",
+                bbox={"boxstyle": "round,pad=0.22", "facecolor": "#eff6ff", "edgecolor": "#bfdbfe", "alpha": 0.92},
+            )
+
     ax.set_title("Low-HP Alert Current (0-4 s)")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Current (mA)")
     ax.set_xlim(0.0, t_win)
+    if y_max > 0.0:
+        ax.set_ylim(-0.15, max(y_max * 1.58, 0.5))
     ax.grid(True, alpha=0.25)
     if series:
-        ax.legend(frameon=False, loc="upper right", fontsize=6.8)
+        ax.legend(frameon=False, loc="upper left", ncol=2, fontsize=5.8, columnspacing=0.9, handlelength=1.4)
     else:
         ax.text(0.5, 0.5, "No capture data", transform=ax.transAxes, ha="center", va="center")
     fig.tight_layout()
@@ -658,45 +895,88 @@ def _plot_lifetime_projections(
         return
     labels = [lbl for p, lbl in CORE_PROFILES if p in stats_map]
     x = np.arange(len(profiles))
-    width = 0.36
+    width = 0.37
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 3.0), dpi=300)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 3.25), dpi=300)
+    legend_handles = None
+    legend_labels = None
 
-    for ax, metric_attr, ylabel, title in (
-        (ax1, "cr2032_days_energy", "Projected Runtime (days, log)", "(a) CR2032 Coin Cell (220 mAh, 3.0 V = 2,376 J)"),
-        (ax2, "c1_minutes_power", "Projected Runtime (min, log)", "(b) LaunchPad C1 Supercap (0.22 F, 3.3->1.8 V = 0.8415 J)"),
+    for ax, metric_attr, unit_lbl, ylabel, title in (
+        (ax1, "cr2032_days_energy", "d", "Projected Runtime (days, log)", "(a) CR2032 Coin Cell (220 mAh, 3.0 V = 2,376 J)"),
+        (ax2, "c1_minutes_power", "m", "Projected Runtime (min, log)", "(b) LaunchPad C1 Supercap (0.22 F, 3.3->1.8 V = 0.8415 J)"),
     ):
         b_vals = [getattr(stats_map[p]["baseline"], metric_attr) if "baseline" in stats_map[p] else np.nan for p in profiles]
         o_vals = [getattr(stats_map[p]["optimized"], metric_attr) if "optimized" in stats_map[p] else np.nan for p in profiles]
         has_b = any(not np.isnan(v) for v in b_vals)
         has_o = any(not np.isnan(v) for v in o_vals)
         if has_b:
-            ax.bar(
+            bars_b = ax.bar(
                 x - (width / 2 if has_o else 0.0),
                 [v if not np.isnan(v) else 0.0 for v in b_vals],
                 width=width,
-                label="Baseline",
+                label="Baseline (5cf488d)",
                 color="#dc2626",
                 alpha=0.9,
             )
+            for idx, b in enumerate(bars_b):
+                v = b_vals[idx]
+                if not np.isnan(v) and v > 0:
+                    fmt = f"{v:.1f}{unit_lbl}" if v >= 1.0 else f"{v:.2f}{unit_lbl}"
+                    ax.text(
+                        b.get_x() + b.get_width() * 0.45,
+                        v * 1.12,
+                        fmt,
+                        ha="center",
+                        va="bottom",
+                        fontsize=5.2,
+                        color="#991b1b",
+                    )
         if has_o:
-            ax.bar(
+            bars_o = ax.bar(
                 x + (width / 2 if has_b else 0.0),
                 [v if not np.isnan(v) else 0.0 for v in o_vals],
                 width=width,
-                label="Optimized",
+                label="Optimized (Tier 1)",
                 color="#10b981",
                 alpha=0.9,
             )
-        ax.set_yscale("log")
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, fontsize=6.8)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title, fontsize=8.2)
-        ax.grid(True, axis="y", which="both", alpha=0.25)
-        ax.legend(frameon=False, loc="upper left", fontsize=7.0)
+            for idx, b in enumerate(bars_o):
+                v = o_vals[idx]
+                if not np.isnan(v) and v > 0:
+                    fmt = f"{v:.1f}{unit_lbl}" if v >= 1.0 else f"{v:.2f}{unit_lbl}"
+                    ax.text(
+                        b.get_x() + b.get_width() * 0.55,
+                        v * 1.12,
+                        fmt,
+                        ha="center",
+                        va="bottom",
+                        fontsize=5.2,
+                        color="#065f46",
+                    )
 
-    fig.tight_layout()
+        ax.set_yscale("log")
+        all_pos = [v for v in b_vals + o_vals if not np.isnan(v) and v > 0]
+        if all_pos:
+            ax.set_ylim(min(all_pos) * 0.48, max(all_pos) * 3.4)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=6.6)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title, fontsize=8.0)
+        ax.grid(True, axis="y", which="both", alpha=0.25)
+        if legend_handles is None:
+            legend_handles, legend_labels = ax.get_legend_handles_labels()
+
+    if legend_handles:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.995),
+            ncol=2,
+            frameon=False,
+            fontsize=7.6,
+        )
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.91])
     fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
 
@@ -708,8 +988,8 @@ def render_summary_markdown(
     lines = [
         "# EnergyTrace Summary Table",
         "",
-        "| Profile | Variant | $T$ (s) | $N$ | $E_{\\text{tot}}$ (mJ) | $P_{\\text{mean}}$ (uW) | $I_{\\text{tw}}$ (uA) | $I_{p50}$ (uA) | $I_{p95}$ (uA) | $V$–$I$ Diff (%) | CR2032 (days) | C1 Cap (min) |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Profile | Variant | $T$ (s) | $N$ | $E_{\\text{tot}}$ (mJ) | $P_{\\text{mean}}$ (uW) | $I_{\\text{ev}}$ (uA) | $I_{\\text{tw}}$ (uA) | $I_{p50}$ (uA) | $I_{p95}$ (uA) | $V$–$I$ Diff (%) | CR2032 (days) | C1 Cap (min) |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     all_profiles = list(CORE_PROFILES) + list(OPTIONAL_PROFILES)
     for p_key, p_lbl in all_profiles:
@@ -722,8 +1002,8 @@ def render_summary_markdown(
                 continue
             lines.append(
                 f"| {clean_lbl} | {var} | {st.duration_s:.2f} | {st.sample_count} | "
-                f"{st.total_energy_mJ:.3f} | {st.mean_power_uW:.2f} | {st.tw_mean_current_uA:.2f} | "
-                f"{st.tw_median_current_uA:.2f} | {st.tw_p95_current_uA:.2f} | "
+                f"{st.total_energy_mJ:.3f} | {st.mean_power_uW:.2f} | {st.ev_mean_current_uA:.2f} | "
+                f"{st.tw_mean_current_uA:.2f} | {st.tw_median_current_uA:.2f} | {st.tw_p95_current_uA:.2f} | "
                 f"{st.power_discrepancy_pct:.2f} | {st.cr2032_days_energy:.2f} | {st.c1_minutes_power:.2f} |"
             )
 
@@ -732,8 +1012,8 @@ def render_summary_markdown(
             "",
             "## Baseline vs. Optimized Deltas",
             "",
-            "| Profile | $\\Delta I_{\\text{tw}}$ (uA) | $\\Delta P_{\\text{mean}}$ (uW) | Power Reduction (%) | Factor |",
-            "|---|---:|---:|---:|---:|",
+            "| Profile | $\\Delta I_{\\text{ev}}$ (uA) | $\\Delta I_{\\text{tw}}$ (uA) | $\\Delta P_{\\text{mean}}$ (uW) | Power Reduction (%) | Factor |",
+            "|---|---:|---:|---:|---:|---:|",
         ])
         for p_key, p_lbl in all_profiles:
             if p_key not in deltas_map:
@@ -741,10 +1021,14 @@ def render_summary_markdown(
             d = deltas_map[p_key]
             clean_lbl = p_lbl.replace("\n", " ")
             lines.append(
-                f"| {clean_lbl} | {d['delta_tw_current_uA']:.2f} | {d['delta_mean_power_uW']:.2f} | "
-                f"{d['delta_mean_power_pct']:.2f}% | {d['power_reduction_factor']:.2f}x |"
+                f"| {clean_lbl} | {d['delta_ev_current_uA']:.2f} | {d['delta_tw_current_uA']:.2f} | "
+                f"{d['delta_mean_power_uW']:.2f} | {d['delta_mean_power_pct']:.2f}% | {d['power_reduction_factor']:.2f}x |"
             )
-    lines.append("")
+    lines.extend([
+        "",
+        "> **Note ($I_{\\text{ev}}$ vs. $I_{\\text{tw}}$):** $I_{\\text{ev}} = E_{\\text{tot}} / (T \\cdot V_{\\text{mean}})$ is derived directly from CCS EnergyTrace's hardware-accumulated `Energy (uJ)` counter (exact mean current), whereas $I_{\\text{tw}}$ is the time-weighted integral of `Current (nA)`, which reflects CCS's `EnergyTraceRunningAverageFilter` (~100–175 ms sample-hold tail after brief active pulses).",
+        "",
+    ])
     return "\n".join(lines)
 
 
@@ -795,7 +1079,7 @@ def run_pipeline(
         "waveform_low_hp": out_dir / "waveform_low_hp.png",
         "lifetime_projections": out_dir / "lifetime_projections.png",
     }
-    _plot_power_comparison(stats_map, deltas_map, fig_paths["power_comparison"])
+    _plot_power_comparison(stats_map, deltas_map, fig_paths["power_comparison"], traces_map=traces_map)
     _plot_waveforms_idle_ai(traces_map, fig_paths["waveforms_idle_ai"])
     _plot_waveform_low_hp(traces_map, fig_paths["waveform_low_hp"])
     _plot_lifetime_projections(stats_map, fig_paths["lifetime_projections"])
