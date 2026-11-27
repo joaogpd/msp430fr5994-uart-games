@@ -81,10 +81,10 @@ bool              pmm_woke_from_lpmx5(void);
 void pmm_unlock_io(void);
 
 /*
- * true : SVSH also active in LPM2/3/4/x.5 (reset at ~1.8-2.0 V even
- *        while asleep; slightly more current).
- * false: SVSH only in AM/LPM0/LPM1 (PUC default). The BOR still protects
- *        the device, at a lower threshold.
+ * true : SVSH also active in LPM2/3/4/x.5 (reset at ~1.88 V even while
+ *        asleep; BOR/PUC default, ~0.2-0.3 uA). Keep true when using FRAM.
+ * false: SVSH only in AM/LPM0/LPM1. The BOR still protects the device,
+ *        at a lower threshold.
  */
 void pmm_svsh_in_lpm(bool enable);
 

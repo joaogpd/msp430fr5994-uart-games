@@ -28,6 +28,9 @@ static const gpio_regs_t s_regs[GPIO_PORT_COUNT] =
 {
     PORT_REGS(1), PORT_REGS(2), PORT_REGS(3), PORT_REGS(4),
     PORT_REGS(5), PORT_REGS(6), PORT_REGS(7), PORT_REGS(8),
+    /* P9 (PE_L): no port interrupt vector */
+    { &P9IN, &P9OUT, &P9DIR, &P9REN, &P9SEL0, &P9SEL1,
+      &P9SELC, NULL, NULL, NULL },
     /* PJ: no interrupt capability */
     { &PJIN_L, &PJOUT_L, &PJDIR_L, &PJREN_L, &PJSEL0_L, &PJSEL1_L,
       &PJSELC_L, NULL, NULL, NULL },

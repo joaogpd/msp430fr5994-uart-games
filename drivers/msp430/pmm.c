@@ -76,7 +76,8 @@ void pmm_svsh_in_lpm(bool enable)
 #pragma CODE_SECTION(pmm_lpm_from_ram, ".TI.ramfunc")
 static void pmm_lpm_from_ram(uint16_t sr_bits)
 {
-    FRCTL0 = FRCTLPW;
+    __disable_interrupt();
+    FRCTL0_H = FRCTLPW_H;
     GCCTL0 &= (uint16_t)~FRPWR;
     FRCTL0_H = 0u;
     __bis_SR_register(sr_bits);

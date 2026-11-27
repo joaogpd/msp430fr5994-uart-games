@@ -54,8 +54,8 @@ typedef enum
     CS_LFXT_FAULT       /* crystal did not start; ACLK runs from VLO */
 } cs_status_t;
 
-/* Recommended default: 8 MHz (no FRAM wait states), SMCLK 8 MHz, LFXT on */
-#define CS_CONFIG_DEFAULT { CS_DCO_8MHZ, CS_DIV_1, true, false, 1000u }
+/* Recommended default: 8 MHz (no FRAM wait states), SMCLK 8 MHz, LFXT on (low drive) */
+#define CS_CONFIG_DEFAULT { CS_DCO_8MHZ, CS_DIV_1, true, true, 1000u }
 
 cs_status_t cs_init(const cs_config_t *cfg);
 

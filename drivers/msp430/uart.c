@@ -28,6 +28,7 @@ typedef struct
     volatile uint16_t  head;        /* written by uart_write */
     volatile uint16_t  tail;        /* advanced by the TX ISR */
     uart_rx_callback_t rx_cb;
+    uart_clk_t         clk;
     volatile bool      waiting;     /* main sleeps until the TX ISR moves */
     bool               running;
 } uart_state_t;
@@ -87,6 +88,7 @@ bool uart_init(uart_id_t id, const uart_config_t *cfg)
     s_u[id].head  = 0u;
     s_u[id].tail  = 0u;
     s_u[id].rx_cb = cfg->rx_cb;
+    s_u[id].clk   = cfg->clk;
     s_u[id].waiting = false;
 
     UREG(id, OFS_CTLW0) = UCSWRST | ((cfg->clk == UART_CLK_ACLK) ? UCSSEL__ACLK : UCSSEL__SMCLK);
@@ -124,7 +126,9 @@ uint16_t uart_write(uart_id_t id, const void *data, uint16_t len)
     while (n < len && used(u) < (uint16_t)(u->size - 1u))
     {
         u->buf[u->head] = p[n++];
-        u->head = (uint16_t)((u->head + 1u) % u->size);
+        uint16_t next = (uint16_t)(u->head + 1u);
+        if (next >= u->size) { next = 0u; }
+        u->head = next;
     }
     if (n && !(UREG(id, OFS_IE) & UCTXIE))
     {
@@ -157,7 +161,7 @@ void uart_write_all(uart_id_t id, const void *data, uint16_t len)
         s_u[id].waiting = true;
         if (used(&s_u[id]) >= (uint16_t)(s_u[id].size - 1u))
         {
-            pmm_enter_lpm(PMM_LPM3);    /* sets GIE atomically */
+            pmm_enter_lpm((s_u[id].clk == UART_CLK_ACLK) ? PMM_LPM3 : PMM_LPM0); /* sets GIE atomically */
         }
         else
         {
@@ -183,7 +187,7 @@ bool uart_flush(uart_id_t id)
         __disable_interrupt();
         if (s_u[id].head == s_u[id].tail) { __enable_interrupt(); break; }
         s_u[id].waiting = true;
-        pmm_enter_lpm(PMM_LPM3);
+        pmm_enter_lpm((s_u[id].clk == UART_CLK_ACLK) ? PMM_LPM3 : PMM_LPM0);
         s_u[id].waiting = false;
     }
 
@@ -216,7 +220,9 @@ static bool service(uart_id_t id)
             if (u->head != u->tail)
             {
                 UREG(id, OFS_TXBUF) = u->buf[u->tail];
-                u->tail = (uint16_t)((u->tail + 1u) % u->size);
+                uint16_t next = (uint16_t)(u->tail + 1u);
+                if (next >= u->size) { next = 0u; }
+                u->tail = next;
             }
             else
             {

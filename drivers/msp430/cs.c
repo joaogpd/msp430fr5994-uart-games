@@ -118,6 +118,10 @@ cs_status_t cs_init(const cs_config_t *cfg)
     s_smclk_div = (uint8_t)cfg->smclk_div;
     dco_change(cfg->dco, (uint16_t)((uint16_t)cfg->smclk_div << 4));   /* DIVS field at bits 4-6 */
 
+    /* Keep unused HFXT off; allow hardware clock requests (SMCLKREQEN for eUSCI_A0 in LPM3) */
+    CSCTL4 |= HFXTOFF;
+    CSCTL6 = ACLKREQEN | MCLKREQEN | SMCLKREQEN | MODCLKREQEN;
+
     s_lfxt_ok = false;
     if (cfg->use_lfxt)
     {
@@ -125,11 +129,16 @@ cs_status_t cs_init(const cs_config_t *cfg)
         if (s_lfxt_ok)
         {
             CSCTL2 = (CSCTL2 & (uint16_t)~SELA) | SELA__LFXTCLK;
+            CSCTL4 |= VLOOFF;
+        }
+        else
+        {
+            CSCTL4 &= (uint16_t)~VLOOFF;
         }
     }
     else
     {
-        CSCTL4 |= LFXTOFF;
+        CSCTL4 = (CSCTL4 | LFXTOFF) & (uint16_t)~VLOOFF;
     }
 
     cs_lock();

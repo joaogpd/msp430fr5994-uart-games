@@ -82,9 +82,11 @@ bool timer_start_oneshot_ms(timer_id_t id, uint32_t ms, timer_callback_t cb)
 void timer_stop(timer_id_t id)
 {
     if ((unsigned)id >= TIMER_COUNT) { return; }
+    uint16_t s = hal_enter_critical();
     TREG(id, OFS_CTL)   = MC__STOP;
     TREG(id, OFS_CCTL0) = 0u;
     s_running &= (uint8_t)~(1u << id);
+    hal_exit_critical(s);
 }
 
 bool timer_running(timer_id_t id)

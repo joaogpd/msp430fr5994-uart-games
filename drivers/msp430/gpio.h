@@ -1,7 +1,7 @@
 /*
  * gpio.h - Digital I/O driver for MSP430FR5994
  *
- * Ports P1..P8 support interrupts; PJ does not.
+ * Ports P1..P8 support interrupts; P9 and PJ do not.
  * Reference: SLAU367P chapter 12 (Digital I/O).
  *
  * Boot order required by the port module (SLAU367P 12.3.1):
@@ -27,6 +27,7 @@ typedef enum
     GPIO_PORT_6,
     GPIO_PORT_7,
     GPIO_PORT_8,
+    GPIO_PORT_9,
     GPIO_PORT_J,
     GPIO_PORT_COUNT
 } gpio_port_t;
@@ -66,7 +67,7 @@ typedef enum
 typedef enum
 {
     GPIO_OK = 0,
-    GPIO_ERR_PARAM,         /* bad port/pin or port has no interrupts (PJ) */
+    GPIO_ERR_PARAM,         /* bad port/pin or port has no interrupts (P9/PJ) */
 } gpio_status_t;
 
 /*
@@ -77,7 +78,7 @@ typedef enum
 typedef bool (*gpio_callback_t)(gpio_port_t port, uint8_t pin_number);
 
 /*
- * Put every pin (P1..P8, PJ) into GPIO, output-low, no pull: the
+ * Put every pin (P1..P9, PJ) into GPIO, output-low, no pull: the
  * lowest-leakage state for unconnected pins (SLAU367P 12.3.2).
  * Does not touch PxIES/PxIE/PxIFG so an LPMx.5 wake flag survives.
  * Call before pmm_unlock_io(). Drivers then reclaim the pins they need.
