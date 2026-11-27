@@ -290,7 +290,7 @@ def sync_proxy_from_screen(proxy: DungeonSim, scr: AnsiScreen, hud: Dict[str, in
 
 def load_policy(genome_path: Path, quantized: bool = True):
     gdata = json.loads(genome_path.read_text(encoding="utf-8"))
-    model_type = gdata.get("model", "heuristic")
+    model_type = gdata.get("model_type") or gdata.get("model") or ("mlp" if "w1" in gdata else "heuristic")
     if model_type == "mlp":
         g = TinyMLPGenome.from_dict(gdata)
     else:
