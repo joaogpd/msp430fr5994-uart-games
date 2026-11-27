@@ -3,6 +3,7 @@ Debug/
 Release/
 .metadata/
 .launches/
+.settings/
 
 # Compiled & intermediate embedded artifacts
 *.obj
@@ -18,6 +19,17 @@ Release/
 *.rl
 *.nfo
 *.aux
+
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+
+# LaTeX intermediate build artifacts (keep paper.tex and paper.pdf)
+*.log
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
 
 # Editor & OS files
 .vscode/
