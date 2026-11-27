@@ -278,8 +278,9 @@ class AnsiScreen:
                     elif ch == "J" and self.csi == "2":
                         self.clear()
                         self._awaiting_full_frame = True
-                        self.frame_timestamps.append(t_now)
-                        self._frame_header_open = True
+                        if not self._frame_header_open:
+                            self.frame_timestamps.append(t_now)
+                            self._frame_header_open = True
                     elif ch == "K":
                         for cc in range(self.c, W):
                             self.grid[self.r][cc] = " "
@@ -737,6 +738,89 @@ def seek_low_hp(
     return False
 
 
+def _is_dead_or_game_over(scr: AnsiScreen) -> bool:
+    """Return True if screen is game_over or zombie s_game_over masked by 'c' (HP:00)."""
+    st = scr.detect_state()
+    if st == "game_over":
+        return True
+    if st in ("human_play", "low_hp"):
+        hud = scr.parse_hud()
+        return bool(hud["hud_valid"]) and hud["hp"] == 0
+    return False
+
+
+def _enter_ai_demo(
+    ser,
+    scr: AnsiScreen,
+    use_mlp: bool,
+    timeout_s: float = 2.0,
+) -> None:
+    """Start AI Demo ('4'), wait/drain full frame, and optionally toggle Tiny-MLP ('t')."""
+    send_bytes(ser, scr, b"4")
+    if not wait_until(
+        ser,
+        scr,
+        lambda: scr.detect_state() in ("ai_heuristic", "low_hp"),
+        timeout_s,
+    ):
+        raise RuntimeError(f"Failed to start AI Heuristic demo (state={scr.detect_state()})")
+    drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
+    if use_mlp:
+        send_bytes(ser, scr, b"t")
+        if not wait_until(
+            ser,
+            scr,
+            lambda: scr.detect_state() == "ai_mlp" or "TINY-MLP" in scr.row(19),
+            timeout_s,
+        ):
+            raise RuntimeError(
+                f"Failed to switch AI demo to Tiny-MLP (row0={scr.row(0).strip()})"
+            )
+        drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
+
+
+def _build_rapid_bursts(scr: AnsiScreen) -> List[Tuple[bytes, Callable[[], bool]]]:
+    """Deterministic <=12 B UART burst payloads and seed-proof post-conditions."""
+    return [
+        (
+            b"w d s a c",
+            lambda: "CAMERA RE-CENTERED" in scr.row(19) or _is_dead_or_game_over(scr),
+        ),
+        (
+            b"a s d w  ",
+            lambda: (
+                ("DIR:N" in scr.row(4) and scr.parse_hud()["empowered"] == 1)
+                or _is_dead_or_game_over(scr)
+                or scr.detect_state() == "class_select"
+                or (
+                    "DIR:E" in scr.row(4)
+                    and ("ADVENTURE BEGINS" in scr.row(19) or scr.parse_hud()["empowered"] == 1)
+                )
+            ),
+        ),
+        (
+            b"\x1b[A\x1b[C\x1b[B\x1b[D",
+            lambda: "DIR:W" in scr.row(4) or _is_dead_or_game_over(scr),
+        ),
+        (
+            b"\x1b[C\x1b[B\x1b[D\x1b[A",
+            lambda: (
+                "DIR:N" in scr.row(4)
+                or _is_dead_or_game_over(scr)
+                or scr.detect_state() == "class_select"
+            ),
+        ),
+        (
+            b"s a w d c",
+            lambda: (
+                ("CAMERA RE-CENTERED" in scr.row(19) and "DIR:E" in scr.row(4))
+                or _is_dead_or_game_over(scr)
+                or scr.detect_state() == "class_select"
+            ),
+        ),
+    ]
+
+
 def ensure_class_select(ser, scr: AnsiScreen, timeout_s: float = 30.0) -> bool:
     """Reliably transition the firmware to Class Select ('NEW ADVENTURE')."""
     send_bytes(ser, scr, b"\x0c")
@@ -762,7 +846,7 @@ def ensure_class_select(ser, scr: AnsiScreen, timeout_s: float = 30.0) -> bool:
             wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
             drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
             continue
-        if st == "game_over":
+        if _is_dead_or_game_over(scr):
             send_bytes(ser, scr, b"w")
             wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
             drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
@@ -780,7 +864,7 @@ def ensure_class_select(ser, scr: AnsiScreen, timeout_s: float = 30.0) -> bool:
             seek_low_hp(ser, scr, target_death=True, timeout_s=rem)
             if not scr.is_frame_complete() or scr._awaiting_full_frame:
                 drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
-            if scr.detect_state() == "game_over":
+            if _is_dead_or_game_over(scr):
                 send_bytes(ser, scr, b"w")
                 wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
                 drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
@@ -812,10 +896,7 @@ def wait_for_user_start(
             if chunk:
                 scr.feed(chunk, ser=ser)
         if profile in ("ai-heuristic", "ai-mlp") and scr.detect_state() == "ai_demo_ended":
-            send_bytes(ser, scr, b"4")
-            if profile == "ai-mlp":
-                wait_until(ser, scr, lambda: scr.detect_state() in ("ai_heuristic", "low_hp"), 1.5)
-                send_bytes(ser, scr, b"t")
+            _enter_ai_demo(ser, scr, use_mlp=(profile == "ai-mlp"))
 
     if wait_start:
         print(
@@ -862,27 +943,21 @@ def run_profile(
     if profile == "idle":
         send_bytes(ser, scr, b"\x0c")
         wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+        drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
     elif profile == "play":
         send_bytes(ser, scr, b"1")
-        if not wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 2.0):
-            raise RuntimeError(f"Failed to start Knight run for play profile (state={scr.detect_state()})")
-    elif profile == "ai-heuristic":
-        send_bytes(ser, scr, b"4")
-        if not wait_until(ser, scr, lambda: scr.detect_state() in ("ai_heuristic", "low_hp"), 2.0):
-            raise RuntimeError(f"Failed to start AI Heuristic demo (state={scr.detect_state()})")
-    elif profile == "ai-mlp":
-        send_bytes(ser, scr, b"4")
-        if not wait_until(ser, scr, lambda: scr.detect_state() in ("ai_heuristic", "low_hp"), 2.0):
-            raise RuntimeError(f"Failed to start AI demo before toggling MLP (state={scr.detect_state()})")
-        drain_serial(ser, scr, 0.25)
-        send_bytes(ser, scr, b"t")
         if not wait_until(
             ser,
             scr,
-            lambda: scr.detect_state() == "ai_mlp" or "TINY-MLP" in scr.row(19),
+            lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(),
             2.0,
         ):
-            raise RuntimeError(f"Failed to switch AI demo to Tiny-MLP (row0={scr.row(0).strip()})")
+            raise RuntimeError(f"Failed to start Knight run for play profile (state={scr.detect_state()})")
+        drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
+    elif profile == "ai-heuristic":
+        _enter_ai_demo(ser, scr, use_mlp=False)
+    elif profile == "ai-mlp":
+        _enter_ai_demo(ser, scr, use_mlp=True)
     elif profile == "low-hp":
         send_bytes(ser, scr, b"1")
         if not wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp"), 2.0):
@@ -957,18 +1032,8 @@ def run_profile(
 
         elif profile in ("ai-heuristic", "ai-mlp"):
             if scr.detect_state() == "ai_demo_ended":
-                send_bytes(ser, scr, b"4")
+                _enter_ai_demo(ser, scr, use_mlp=(profile == "ai-mlp"))
                 restarts += 1
-                if profile == "ai-mlp":
-                    wait_until(ser, scr, lambda: scr.detect_state() in ("ai_heuristic", "low_hp"), 1.5)
-                    drain_serial(ser, scr, 0.25)
-                    send_bytes(ser, scr, b"t")
-                    wait_until(
-                        ser,
-                        scr,
-                        lambda: scr.detect_state() == "ai_mlp" or "TINY-MLP" in scr.row(19),
-                        1.5,
-                    )
 
         time.sleep(0.01)
 
@@ -979,6 +1044,7 @@ def run_profile(
     if profile in ("ai-heuristic", "ai-mlp"):
         send_bytes(ser, scr, b"n")
         wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+        drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
 
     hud_end = scr.parse_hud()
     return {
@@ -1017,8 +1083,14 @@ def verify_uart(
     # 1. DSR / Ctrl+L Handshake
     ensure_class_select(ser, scr)
     dsr_before = scr.dsr_count
+    fb0 = len(scr.frame_timestamps)
     send_bytes(ser, scr, b"\x0c")
-    ok_redraw = wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+    ok_redraw = wait_until(
+        ser,
+        scr,
+        lambda: len(scr.frame_timestamps) > fb0 and scr.detect_state() == "class_select",
+        1.5,
+    )
     # Also wait up to 1.2 s to verify DSR responder if Baseline sends \x1b[5n
     drain_serial(ser, scr, 1.2)
     record(
@@ -1094,20 +1166,18 @@ def verify_uart(
     record("3_csi_arrows", True, "4/4 CSI arrow sequences (Up/Right/Down/Left) verified")
 
     # 4. 5x Rapid Multi-Byte Bursts (<= 12 B < 15 B CMD_QUEUE_SIZE)
-    bursts = [
-        (b"w d s a c", lambda: "CAMERA RE-CENTERED" in scr.row(19) or scr.detect_state() == "game_over"),  # 9 bytes
-        (b"a s d w  ", lambda: "MEDITATED" in scr.row(19) or scr.detect_state() == "game_over"),  # 9 bytes
-        (b"\x1b[A\x1b[C\x1b[B\x1b[D", lambda: "DIR:W" in scr.row(4) or scr.detect_state() == "game_over"),  # 12 bytes: 4 CSI arrows
-        (b"\x1b[C\x1b[B\x1b[D\x1b[A", lambda: "DIR:N" in scr.row(4) or scr.detect_state() == "game_over"),  # 12 bytes
-        (b"s a w d c", lambda: ("CAMERA RE-CENTERED" in scr.row(19) and "DIR:E" in scr.row(4)) or scr.detect_state() == "game_over"),  # 9 bytes
-    ]
+    bursts = _build_rapid_bursts(scr)
     for idx, (burst, pred) in enumerate(bursts):
         assert len(burst) <= 12
-        if scr.detect_state() == "game_over":
+        if _is_dead_or_game_over(scr):
             drain_frame(ser, scr, max_wait_s=0.30, settle_s=0.05)
             send_bytes(ser, scr, b"w")
             wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
             drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
+            send_bytes(ser, scr, b"1")
+            wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(), 1.5)
+            drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
+        elif scr.detect_state() == "class_select":
             send_bytes(ser, scr, b"1")
             wait_until(ser, scr, lambda: scr.detect_state() in ("human_play", "low_hp") and scr.is_frame_complete(), 1.5)
             drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
@@ -1117,6 +1187,10 @@ def verify_uart(
         drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
         if not ok:
             record("4_rapid_bursts", False, f"burst #{idx} {burst!r} failed: state={scr.detect_state()} row4={scr.row(4).strip()} row19={scr.row(19).strip()}")
+    if _is_dead_or_game_over(scr):
+        send_bytes(ser, scr, b"w")
+        wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+        drain_frame(ser, scr, max_wait_s=0.35, settle_s=0.05)
     record("4_rapid_bursts", True, "5/5 rapid bursts (<= 12 B) processed with zero dropped commands")
 
     # 5. 80x24 ANSI/SGR Integrity across Class Select, Help, Full Map, Gameplay
@@ -1146,21 +1220,13 @@ def verify_uart(
     # 6. 500 ms AI Demo Cadence (Heuristic A & Tiny-MLP B)
     ensure_class_select(ser, scr)
     for model_name, use_mlp in (("heuristic", False), ("tiny_mlp", True)):
-        send_bytes(ser, scr, b"4")
-        wait_until(ser, scr, lambda: scr.detect_state() in ("ai_heuristic", "low_hp"), 2.0)
-        if use_mlp:
-            drain_serial(ser, scr, 0.2)
-            send_bytes(ser, scr, b"t")
-            wait_until(ser, scr, lambda: scr.detect_state() == "ai_mlp" or "TINY-MLP" in scr.row(19), 1.5)
+        _enter_ai_demo(ser, scr, use_mlp=use_mlp)
         ts_start_idx = len(scr.frame_timestamps)
         t_end = time.perf_counter() + 3.5
         while time.perf_counter() < t_end:
             drain_serial(ser, scr, 0.05)
             if scr.detect_state() == "ai_demo_ended":
-                send_bytes(ser, scr, b"4")
-                if use_mlp:
-                    wait_until(ser, scr, lambda: scr.detect_state() in ("ai_heuristic", "low_hp"), 1.5)
-                    send_bytes(ser, scr, b"t")
+                _enter_ai_demo(ser, scr, use_mlp=use_mlp)
         new_ts = scr.frame_timestamps[ts_start_idx:]
         dts = [new_ts[k] - new_ts[k - 1] for k in range(1, len(new_ts)) if 0.15 < (new_ts[k] - new_ts[k - 1]) < 1.5]
         med_dt = sorted(dts)[len(dts) // 2] if dts else 0.0
@@ -1172,6 +1238,7 @@ def verify_uart(
         )
         send_bytes(ser, scr, b"n")
         wait_until(ser, scr, lambda: scr.detect_state() == "class_select", 1.5)
+        drain_frame(ser, scr, max_wait_s=0.45, settle_s=0.06)
 
     # 7. Low-HP BEL + Banner Pulse Cadence
     send_bytes(ser, scr, b"1")
@@ -1216,6 +1283,9 @@ class _FakeSerial:
         self.dir = 0
         self.ai_model = 0
         self.ai_ticks = 0
+        self.empowered = False
+        self.status_msg = "READY."
+        self.meditate_status_override: Optional[str] = None
         # Simple 28x17 room with an enemy at (8, 5) and trap at (5, 7)
         self.enemy_pos = (8, 5)
         self.trap_pos = (5, 7)
@@ -1284,14 +1354,20 @@ class _FakeSerial:
 
         out.extend(f"\x1b[2;58HHP:{self.hp:02d}/{self.max_hp:02d} MP:02/04".encode("ascii"))
         out.extend(b"\x1b[3;58HATK:03  DEF:01")
-        out.extend(b"\x1b[4;58HGOLD:0000")
+        emp_tag = " \x1b[1;32m[EMP]\x1b[0m      " if self.empowered else "            "
+        out.extend(f"\x1b[4;58HGOLD:0000{emp_tag}".encode("ascii"))
         out.extend(f"\x1b[5;58HKNT DIR:{dir_chars[self.dir]} {self.px:02d},{self.py:02d}".encode("ascii"))
         if self.mode == "game_over":
-            out.extend(b"\x1b[20;1HYOU DIED! W/SPACE:NEW RUN")
+            msg = (
+                self.status_msg
+                if self.status_msg.startswith("CAMERA RE-CENTERED")
+                else "YOU DIED! W/SPACE:NEW RUN"
+            )
+            out.extend(f"\x1b[20;1H{msg}".encode("ascii"))
         elif self.mode == "ai_ended":
             out.extend(b"\x1b[20;1HAI DEMO ENDED! PRESS 4/W FOR NEW DEMO, N FOR CLASS SELECT.")
         else:
-            out.extend(b"\x1b[20;1HREADY.")
+            out.extend(f"\x1b[20;1H{self.status_msg}".encode("ascii"))
         if low:
             out.extend(b"\x07")
         self._emit(bytes(out))
@@ -1341,31 +1417,48 @@ class _FakeSerial:
             self._render_current()
             return
         if self.mode == "class_select":
-            if ch == "1":
+            if ch in ("1", "w", "W", " "):
                 self.mode = "human"
                 self.hp = 16
                 self.px, self.py = 5, 5
+                self.dir = 1
+                self.empowered = False
+                self.status_msg = "ADVENTURE BEGINS! PRESS ? FOR HELP, M FOR MAP, H FOR HALL OF FAME."
             elif ch == "4":
                 self.mode = "ai"
                 self.ai_model = 0
                 self.hp = 16
                 self.ai_ticks = 0
+                self.empowered = False
+                self.status_msg = "READY."
             self._render_current()
             return
         if self.mode in ("ai", "ai_ended"):
             if ch in ("n", "N"):
                 self.mode = "class_select"
+                self.status_msg = "READY."
             elif ch in ("t", "T") and self.mode == "ai":
                 self.ai_model ^= 1
+                self.status_msg = (
+                    "SWITCHED ON-CHIP FRAM AI TO: HEURISTIC A (22B Q7)"
+                    if self.ai_model == 0
+                    else "SWITCHED ON-CHIP FRAM AI TO: TINY-MLP B (587B Q7)"
+                )
             elif ch == "4" and self.mode == "ai_ended":
                 self.mode = "ai"
                 self.ai_model = 0
                 self.hp = 16
+                self.status_msg = "READY."
+            self._render_current()
+            return
+        if ch in ("c", "C"):
+            self.status_msg = "CAMERA RE-CENTERED."
             self._render_current()
             return
         if self.mode == "game_over":
             if ch in ("w", "W", " "):
                 self.mode = "class_select"
+                self.status_msg = "READY."
                 self._render_current()
             return
         # human mode
@@ -1376,21 +1469,31 @@ class _FakeSerial:
         elif ch in ("h", "H"):
             self.mode = "hof"
         elif ch == " ":
+            self.empowered = True
+            self.status_msg = (
+                self.meditate_status_override
+                if self.meditate_status_override is not None
+                else "MEDITATED (+1 MP) & EMPOWERED NEXT ATTACK (+50% DMG)!"
+            )
             if abs(self.px - self.enemy_pos[0]) + abs(self.py - self.enemy_pos[1]) == 1:
                 self.hp = max(0, self.hp - 1)
                 if self.hp == 0:
                     self.mode = "game_over"
+                    self.status_msg = "YOU DIED! W/SPACE:NEW RUN"
         elif ch in ("w", "d", "s", "a"):
             dmap = {"w": (0, -1, 0), "d": (1, 0, 1), "s": (0, 1, 2), "a": (-1, 0, 3)}
             dx, dy, d = dmap[ch]
             self.dir = d
             nx, ny = self.px + dx, self.py + dy
-            if 1 <= nx <= 26 and 1 <= ny <= 15 and (nx, ny) != self.enemy_pos:
+            if (nx, ny) == self.enemy_pos:
+                self.empowered = False
+            elif 1 <= nx <= 26 and 1 <= ny <= 15:
                 self.px, self.py = nx, ny
                 if (nx, ny) == self.trap_pos:
                     self.hp = max(0, self.hp - 3)
                     if self.hp == 0:
                         self.mode = "game_over"
+                        self.status_msg = "YOU DIED! W/SPACE:NEW RUN"
         self._render_current()
 
 
@@ -1563,6 +1666,141 @@ def run_self_test() -> None:
     assert seek_low_hp(dser2, dscr_mid, target_death=False, timeout_s=5.0, max_steps=20)
     assert dser2.tx_log[0] == b"\x0c", f"Expected Ctrl+L when HUD invalid, got {dser2.tx_log[0]!r}"
     assert all(b"w" not in tx for tx in dser2.tx_log), f"Unexpected 'w' emitted: {dser2.tx_log}"
+
+    # 7. Reordered CSI header coalescing (\x1b[H\x1b[2J\x1b[?25l and \x1b[?25l\x1b[2J\x1b[H)
+    for hdr_chunks in (
+        (b"\x1b[H", b"\x1b[2J", b"\x1b[?25l", b"\x1b[1;37;44m MSP430 DUNGEON FL:01\x1b[0m"),
+        (b"\x1b[?25l", b"\x1b[2J", b"\x1b[H", b"\x1b[1;37;44m MSP430 DUNGEON FL:01\x1b[0m"),
+    ):
+        s_hdr = AnsiScreen()
+        for ch_chunk in hdr_chunks:
+            s_hdr.feed(ch_chunk)
+        assert len(s_hdr.frame_timestamps) == 1, (
+            f"Expected 1 coalesced timestamp for {hdr_chunks!r}, got {len(s_hdr.frame_timestamps)}"
+        )
+
+    # 8. Burst #1 Row 19 Archer-overwrite regression + negative predicate checks
+    b_ser = _FakeSerial()
+    b_scr = AnsiScreen()
+    b_ser.meditate_status_override = "WARNING: CULTIST ARCHER (A!) IS AIMING AT YOU! SIDESTEP!"
+    b_ser.write(b"1")
+    drain_serial(b_ser, b_scr, 0.05)
+    bursts_b = _build_rapid_bursts(b_scr)
+    burst1_payload, burst1_pred = bursts_b[1]
+    assert burst1_payload == b"a s d w  "
+    b_ser.write(burst1_payload)
+    drain_serial(b_ser, b_scr, 0.05)
+    assert "WARNING: CULTIST ARCHER" in b_scr.row(19)
+    assert "DIR:N" in b_scr.row(4) and b_scr.parse_hud()["empowered"] == 1
+    assert burst1_pred() is True, "Burst #1 predicate must pass when Archer overwrites Row 19"
+
+    # Negative check: missing [EMP] with DIR:N must fail Burst #1 predicate
+    b_scr_no_emp = AnsiScreen()
+    b_scr_no_emp.feed(
+        b"\x1b[2J\x1b[H\x1b[?25l\x1b[1;37;44m MSP430 DUNGEON FL:01\x1b[0m"
+        b"\x1b[2;58HHP:16/16 MP:02/04\x1b[4;58HGOLD:0000            \x1b[5;58HKNT DIR:N 05,05\x1b[20;1HREADY."
+    )
+    assert _build_rapid_bursts(b_scr_no_emp)[1][1]() is False
+
+    # Negative check: wrong DIR:W with [EMP] must fail Burst #1 predicate
+    b_scr_dir_w = AnsiScreen()
+    b_scr_dir_w.feed(
+        b"\x1b[2J\x1b[H\x1b[?25l\x1b[1;37;44m MSP430 DUNGEON FL:01\x1b[0m"
+        b"\x1b[2;58HHP:16/16 MP:02/04\x1b[4;58HGOLD:0000 \x1b[1;32m[EMP]\x1b[0m      \x1b[5;58HKNT DIR:W 05,05\x1b[20;1HREADY."
+    )
+    assert _build_rapid_bursts(b_scr_dir_w)[1][1]() is False
+
+    # 9. Mid-burst death & zombie-'c' regression checks on Bursts #1, #3, #4
+    # 9a. Burst #1 death on 'd' -> 'w' -> class_select -> ' ' -> Knight (DIR:E) -> ' ' -> [EMP]
+    m1 = _FakeSerial()
+    m1_scr = AnsiScreen()
+    m1.mode = "human"
+    m1.hp = 3
+    m1.px, m1.py = 5, 6
+    m1.trap_pos = (5, 7)
+    m1._render_current()
+    drain_serial(m1, m1_scr, 0.05)
+    m1.write(b"a s d w  ")
+    drain_serial(m1, m1_scr, 0.05)
+    assert m1_scr.detect_state() in ("human_play", "low_hp")
+    assert "DIR:E" in m1_scr.row(4) and m1_scr.parse_hud()["empowered"] == 1
+    assert _build_rapid_bursts(m1_scr)[1][1]() is True
+
+    # 9b. Burst #1 death on 'w' -> ' ' -> class_select -> ' ' -> Knight (DIR:E, ADVENTURE BEGINS)
+    m1b = _FakeSerial()
+    m1b_scr = AnsiScreen()
+    m1b.mode = "human"
+    m1b.hp = 3
+    m1b.px, m1b.py = 5, 6
+    m1b.trap_pos = (5, 6)
+    m1b._render_current()
+    drain_serial(m1b, m1b_scr, 0.05)
+    m1b.write(b"a s d w  ")
+    drain_serial(m1b, m1b_scr, 0.05)
+    assert "DIR:E" in m1b_scr.row(4) and "ADVENTURE BEGINS" in m1b_scr.row(19)
+    assert _build_rapid_bursts(m1b_scr)[1][1]() is True
+
+    # 9c. Burst #1 death on first ' ' -> second ' ' -> class_select
+    m1c = _FakeSerial()
+    m1c_scr = AnsiScreen()
+    m1c.mode = "human"
+    m1c.hp = 1
+    m1c.px, m1c.py = 7, 6
+    m1c.enemy_pos = (7, 5)
+    m1c.trap_pos = (1, 1)
+    m1c._render_current()
+    drain_serial(m1c, m1c_scr, 0.05)
+    m1c.write(b"a s d w  ")
+    drain_serial(m1c, m1c_scr, 0.05)
+    assert m1c_scr.detect_state() == "class_select"
+    assert _build_rapid_bursts(m1c_scr)[1][1]() is True
+
+    # 9d. Burst #3 death on 'd' (\x1b[C) -> trailing \x1b[A ('w') lands in class_select
+    m3 = _FakeSerial()
+    m3_scr = AnsiScreen()
+    m3.mode = "human"
+    m3.hp = 3
+    m3.px, m3.py = 4, 7
+    m3.trap_pos = (5, 7)
+    m3._render_current()
+    drain_serial(m3, m3_scr, 0.05)
+    m3.write(b"\x1b[C\x1b[B\x1b[D\x1b[A")
+    drain_serial(m3, m3_scr, 0.05)
+    assert m3_scr.detect_state() == "class_select"
+    assert _build_rapid_bursts(m3_scr)[3][1]() is True
+
+    # 9e. Burst #4 death on trailing ' ' before 'c' -> 'c' overwrites Row 19 (zombie s_game_over)
+    m4 = _FakeSerial()
+    m4_scr = AnsiScreen()
+    m4.mode = "human"
+    m4.hp = 1
+    m4.px, m4.py = 6, 6
+    m4.enemy_pos = (7, 6)
+    m4.trap_pos = (1, 1)
+    m4._render_current()
+    drain_serial(m4, m4_scr, 0.05)
+    m4.write(b"s a w d c")
+    drain_serial(m4, m4_scr, 0.05)
+    assert m4_scr.detect_state() == "human_play"
+    assert "CAMERA RE-CENTERED" in m4_scr.row(19)
+    assert m4_scr.parse_hud()["hp"] == 0
+    assert _is_dead_or_game_over(m4_scr) is True
+    assert _build_rapid_bursts(m4_scr)[4][1]() is True
+    m4.tx_log.clear()
+    assert ensure_class_select(m4, m4_scr, timeout_s=5.0)
+    assert m4_scr.detect_state() == "class_select"
+    assert m4.tx_log == [b"\x0c", b"w"], f"Expected zombie recovery via Ctrl+L then 'w', got {m4.tx_log}"
+
+    # 10. wait_for_user_start pump_once ai-mlp restart with countdown=1
+    w_ser = _FakeSerial()
+    w_scr = AnsiScreen()
+    w_ser.mode = "ai_ended"
+    w_ser._render_current()
+    drain_serial(w_ser, w_scr, 0.05)
+    assert w_scr.detect_state() == "ai_demo_ended"
+    wait_for_user_start(w_ser, w_scr, "ai-mlp", wait_start=False, countdown=1)
+    assert w_scr.detect_state() == "ai_mlp"
+    assert w_ser.ai_model == 1
 
     # Temp file write & _persist_outputs failure-persistence sanity
     with tempfile.TemporaryDirectory() as td:
