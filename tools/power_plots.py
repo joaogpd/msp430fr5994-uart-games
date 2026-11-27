@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
 import re
 import tempfile
@@ -111,15 +112,50 @@ def _parse_header_col(raw_col: str) -> Tuple[str, str]:
     return name, unit
 
 
+def _detect_csv_delimiter(sample_lines: List[str]) -> str:
+    """Auto-detect ',' vs ';' CSV delimiter from header/sample lines."""
+    cleaned_lines = [ln.lstrip("\ufeff") for ln in sample_lines if ln.strip()]
+    if not cleaned_lines:
+        return ","
+
+    header = cleaned_lines[0].strip()
+    cols_comma = next(csv.reader([header], delimiter=","))
+    cols_semi = next(csv.reader([header], delimiter=";"))
+    if len(cols_semi) > len(cols_comma):
+        return ";"
+    if len(cols_comma) > len(cols_semi):
+        return ","
+
+    try:
+        dialect = csv.Sniffer().sniff("\n".join(cleaned_lines), delimiters=",;")
+        if dialect.delimiter in (",", ";"):
+            return dialect.delimiter
+    except csv.Error:
+        pass
+    return ","
+
+
 def parse_energytrace_csv(csv_path: Path) -> EnergyTraceData:
     """Parse a CCS 12.5 EnergyTrace Raw Data CSV with unit normalization and validation."""
     if not csv_path.exists():
         raise FileNotFoundError(f"EnergyTrace CSV not found: {csv_path}")
 
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
+        sample_lines: List[str] = []
+        for _ in range(5):
+            ln = f.readline()
+            if not ln:
+                break
+            sample_lines.append(ln)
+        if not any(ln.strip() for ln in sample_lines):
+            raise ValueError(f"Empty CSV file: {csv_path}")
+
+        delimiter = _detect_csv_delimiter(sample_lines)
+        reader = csv.reader(itertools.chain(sample_lines, f), delimiter=delimiter)
         try:
             headers = next(reader)
+            while not headers or not any(cell.strip() for cell in headers):
+                headers = next(reader)
         except StopIteration as exc:
             raise ValueError(f"Empty CSV file: {csv_path}") from exc
 
@@ -318,7 +354,7 @@ def parse_energytrace_csv(csv_path: Path) -> EnergyTraceData:
         has_energy_col=has_energy,
         has_dsr_col=has_dsr,
         dropped_non_monotonic=dropped,
-        raw_headers=[h.strip() for h in headers],
+        raw_headers=[h.strip().lstrip("\ufeff") for h in headers],
     )
 
 
@@ -806,6 +842,9 @@ def _write_synthetic_ccs_csv(
     irregular_sleep_dt: bool = True,
     include_dsr: bool = False,
     unit_variant: bool = False,
+    delimiter: str = ",",
+    quote_rows: bool = False,
+    utf8_bom: bool = False,
 ) -> None:
     """Create a realistic synthetic CCS EnergyTrace CSV with variable DC-DC pulse intervals."""
     t = 0.0
@@ -827,15 +866,17 @@ def _write_synthetic_ccs_csv(
         prev_i_na = curr_na
         t += dt
 
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
+    enc = "utf-8-sig" if utf8_bom else "utf-8"
+    with open(path, "w", encoding=enc, newline="") as f:
+        w_hdr = csv.writer(f, delimiter=delimiter)
+        w_row = csv.writer(f, delimiter=delimiter, quoting=csv.QUOTE_ALL if quote_rows else csv.QUOTE_MINIMAL)
         if unit_variant:
             hdr = ["Time (ms)", "Current (uA)", "Voltage (V)", "Energy (mJ)"]
         else:
             hdr = ["Time (ns)", "Current (nA)", "Voltage (mV)", "Energy (uJ)"]
         if include_dsr:
             hdr.append("DSR")
-        w.writerow(hdr)
+        w_hdr.writerow(hdr)
         for t_s, i_na, v_m, e_u in rows:
             if unit_variant:
                 r = [f"{t_s * 1e3:.3f}", f"{i_na * 1e-3:.3f}", f"{v_m * 1e-3:.4f}", f"{e_u * 1e-3:.6f}"]
@@ -843,7 +884,7 @@ def _write_synthetic_ccs_csv(
                 r = [f"{int(round(t_s * 1e9))}", f"{int(round(i_na))}", f"{int(round(v_m))}", f"{e_u:.4f}"]
             if include_dsr:
                 r.append("0x00")
-            w.writerow(r)
+            w_row.writerow(r)
 
 
 def run_self_test() -> None:
@@ -980,6 +1021,96 @@ def run_self_test() -> None:
         )
         st_both_zero = compute_trace_stats(parse_energytrace_csv(both_zero_csv))
         assert st_both_zero.power_discrepancy_pct == 0.0, st_both_zero
+
+        # 8. Windows-locale semicolon-delimited + quoted dot-decimal CCS 12.5 CSVs (+ UTF-8 BOM)
+        semi_ccs_csv = tmp_path / "semi_ccs.csv"
+        semi_ccs_csv.write_text(
+            "\ufeffTime (ns);Current (nA);Voltage (mV);Energy (uJ)\n"
+            '"0";"0";"3278";"0.6"\n'
+            '"15000000000";"200000";"3290";"9885.6"\n'
+            '"30000000000";"200000";"3290";"19755.6"\n',
+            encoding="utf-8",
+        )
+        tr_semi = parse_energytrace_csv(semi_ccs_csv)
+        assert tr_semi.raw_headers == ["Time (ns)", "Current (nA)", "Voltage (mV)", "Energy (uJ)"]
+        assert abs(tr_semi.time_s[-1] - 30.0) < 1e-9
+        assert abs(tr_semi.voltage_V[0] - 3.278) < 1e-6
+        assert abs(tr_semi.energy_mJ[0] - 0.0006) < 1e-9
+        st_semi = compute_trace_stats(tr_semi)
+        assert abs(st_semi.total_energy_mJ - 19.755) < 1e-6, st_semi
+
+        # 9. Semicolon-delimited 3-column summary export rejection
+        bad_semi_summary = tmp_path / "bad_semi_summary.csv"
+        bad_semi_summary.write_text(
+            'Item;Runtime (nS);Energy (nJ)\n"main";"1000000";"5000"\n',
+            encoding="utf-8",
+        )
+        try:
+            parse_energytrace_csv(bad_semi_summary)
+            raise AssertionError("Expected ValueError for semicolon 3-column summary CSV")
+        except ValueError as exc:
+            assert "Raw Data" in str(exc)
+
+        # 10. Semicolon-delimited header variant + DSR warning
+        semi_dsr_csv = tmp_path / "semi_dsr.csv"
+        _write_synthetic_ccs_csv(
+            semi_dsr_csv,
+            duration_s=30.0,
+            base_ua=250.0,
+            pulse_ua=250.0,
+            pulse_period_s=0.0,
+            pulse_width_s=0.0,
+            include_dsr=True,
+            unit_variant=True,
+            delimiter=";",
+            quote_rows=True,
+            utf8_bom=True,
+        )
+        with warnings.catch_warnings(record=True) as caught_semi_dsr:
+            warnings.simplefilter("always")
+            tr_semi_dsr = parse_energytrace_csv(semi_dsr_csv)
+        assert tr_semi_dsr.has_dsr_col is True
+        assert any("EnergyTrace++" in str(w.message) for w in caught_semi_dsr)
+        st_semi_dsr = compute_trace_stats(tr_semi_dsr)
+        assert abs(st_semi_dsr.tw_mean_current_uA - 250.0) < 1.0, st_semi_dsr
+
+        # 11. Semicolon-delimited ragged row regression test
+        semi_ragged_csv = tmp_path / "semi_ragged.csv"
+        semi_ragged_csv.write_text(
+            'Time (ns);Current (nA);Voltage (mV);Energy (uJ)\n'
+            '"0";"100000";"3300";"0.0"\n'
+            '"15000000000";"100000"\n'
+            '"30000000000";"100000";"3300";"9900.0"\n',
+            encoding="utf-8",
+        )
+        with warnings.catch_warnings(record=True) as caught_semi_rag:
+            warnings.simplefilter("always")
+            tr_semi_rag = parse_energytrace_csv(semi_ragged_csv)
+        assert len(tr_semi_rag.time_s) == 2
+        assert any("ragged" in str(w.message).lower() or "incomplete" in str(w.message).lower() for w in caught_semi_rag)
+        assert abs(compute_trace_stats(tr_semi_rag).total_energy_mJ - 9.9) < 1e-6
+
+        # 12. Full pipeline run with semicolon-delimited + quoted dot-decimal CSVs
+        semi_data_dir = tmp_path / "semi_data"
+        semi_out_dir = tmp_path / "semi_figures"
+        semi_data_dir.mkdir()
+        for p_key, (b_cfg, o_cfg) in profiles_cfg.items():
+            _write_synthetic_ccs_csv(
+                semi_data_dir / f"baseline_{p_key}.csv", 30.0, *b_cfg,
+                delimiter=";", quote_rows=True, utf8_bom=True,
+            )
+            _write_synthetic_ccs_csv(
+                semi_data_dir / f"optimized_{p_key}.csv", 30.0, *o_cfg,
+                delimiter=";", quote_rows=True, utf8_bom=True,
+            )
+        semi_payload = run_pipeline(
+            semi_data_dir,
+            semi_out_dir,
+            tmp_path / "semi_summary.json",
+            tmp_path / "semi_summary.md",
+            allow_partial=False,
+        )
+        assert len(semi_payload["deltas"]) == 5
 
     print("[SELF-TEST] All power_plots.py offline checks PASSED.", flush=True)
 

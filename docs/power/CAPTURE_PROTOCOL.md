@@ -97,6 +97,7 @@ After each `30 sec` capture finishes in CCS:
      ```text
      Time (ns),Current (nA),Voltage (mV),Energy (uJ)
      ```
+     *(Note: Depending on Windows regional settings, CCS 12.5 may export semicolon-delimited `;` columns with quoted dot-decimal values such as `Time (ns);Current (nA);Voltage (mV);Energy (uJ)` and `"0";"0";"3278";"0.6"`. `tools/power_plots.py` auto-detects both `,` and `;` delimiters, so no manual CSV conversion is needed.)*
    - **REJECTED Summary header (DO NOT SAVE THIS):**
      ```text
      Item,Runtime (nS),Energy (nJ)
@@ -122,7 +123,7 @@ Immediately after exporting each CSV (before moving to the next run), verify:
 
 1. **Row Count & Header**:
    - The file has `> 100` rows.
-   - Line 1 begins with `Time (` (e.g., `Time (ns),Current (nA),Voltage (mV),Energy (uJ)`).
+   - Line 1 begins with `Time (` (comma- or semicolon-delimited, e.g., `Time (ns),Current (nA),Voltage (mV),Energy (uJ)` or `Time (ns);Current (nA);Voltage (mV);Energy (uJ)`).
    - There is **no `DSR` column** (if `DSR` appears, EnergyTrace++ was accidentally enabled — re-enable energy-only `EnergyTrace` and re-capture).
 2. **Duration & Non-Zero Current**:
    - Final timestamp minus first timestamp is ~`30 s` (`~30,000,000,000 ns`).
