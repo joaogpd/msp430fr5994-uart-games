@@ -72,7 +72,15 @@ int main(void)
             space_game_render();
         }
 
-        /* Sleep until next 20 ms timer tick or UART RX byte */
-        __bis_SR_register(LPM0_bits | GIE);
+        /* Race-free sleep until next 20 ms timer tick or UART RX byte */
+        __disable_interrupt();
+        if (!s_tick_due)
+        {
+            __bis_SR_register(LPM0_bits | GIE);
+        }
+        else
+        {
+            __enable_interrupt();
+        }
     }
 }

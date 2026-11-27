@@ -93,7 +93,7 @@ typedef struct
 
 /*
  * Persisted dungeon run stored in FRAM via ckpt.
- * ~1,244 bytes (<= CKPT_MAX_PAYLOAD of 1,536 bytes).
+ * 1,260 bytes (<= CKPT_MAX_PAYLOAD of 1,536 bytes).
  */
 typedef struct
 {
@@ -598,6 +598,7 @@ static bool load_checkpoint(bool restore_full_run)
         s_help_mode = false;
         s_hof_mode  = false;
         s_class_select = false;
+        s_ai_demo   = false;
         s_was_low_hp = is_low_hp();
         s_low_hp_pulse = false;
         s_low_hp_beep_ticks = 0u;
@@ -2188,13 +2189,24 @@ static void step_in_direction(uint8_t dir)
             s_mana++;
         }
         generate_floor();
-        if (!s_ai_demo)
+        if (s_ai_demo)
+        {
+            s_ai_hidx = 0u;
+            memset(s_ai_hx, 0xFF, sizeof(s_ai_hx));
+            memset(s_ai_hy, 0xFF, sizeof(s_ai_hy));
+        }
+        else
         {
             (void)commit_checkpoint(true);
         }
         if (is_boss_floor(s_floor))
         {
             set_status("ENTERED THE BOSS SANCTUM! PREPARE TO FACE THE BONE WARDEN!");
+        }
+        else if (s_ai_demo)
+        {
+            set_status(is_cave_floor(s_floor) ? "AI DEMO DESCENDED INTO FUNGAL CAVERNS!"
+                                              : "AI DEMO DESCENDED INTO STONE CRYPT!");
         }
         else
         {
@@ -3057,6 +3069,98 @@ static int8_t ai_clamp_q7(int16_t v)
     return (int8_t)v;
 }
 
+static bool ai_is_usable_shrine(uint8_t cell)
+{
+    if ((cell & TILE_F_REVEALED) != 0u) { return false; }
+    if ((cell & TILE_F_ALT) == 0u)      { return (s_hp > 3u); }
+    return true;
+}
+
+static bool ai_blink_dest(uint8_t *ox, uint8_t *oy)
+{
+    uint8_t step;
+    int8_t cx = (int8_t)s_px;
+    int8_t cy = (int8_t)s_py;
+    bool found = false;
+
+    for (step = 1u; step <= 3u; step++)
+    {
+        cx = (int8_t)(cx + DIR_DX[s_dir]);
+        cy = (int8_t)(cy + DIR_DY[s_dir]);
+        if (cx <= 0 || cx >= (int8_t)(DNG_W - 1u) || cy <= 0 || cy >= (int8_t)(DNG_H - 1u)) { break; }
+        if (tile_blocks_move(tile_type((uint8_t)cx, (uint8_t)cy))) { break; }
+        if (find_enemy_at((uint8_t)cx, (uint8_t)cy) < 0)
+        {
+            *ox = (uint8_t)cx;
+            *oy = (uint8_t)cy;
+            found = true;
+        }
+    }
+    return found;
+}
+
+static bool ai_in_aim_line(uint8_t x, uint8_t y)
+{
+    uint8_t i;
+    for (i = 0u; i < DNG_MAX_ENEMIES; i++)
+    {
+        const dng_enemy_t *e = &s_enemies[i];
+        if (e->type == ENEMY_NONE || (e->flags & EF_AIMING) == 0u) { continue; }
+        if ((s_map[e->y][e->x] & TILE_F_VISIBLE) == 0u) { continue; }
+        uint8_t dist = (uint8_t)(u8_abs_diff(e->x, x) + u8_abs_diff(e->y, y));
+        if (dist > 6u) { continue; }
+        if (e->type == ENEMY_ARCHER)
+        {
+            if (e->aim_dx != 0 && y == e->y && (((int16_t)x - (int16_t)e->x) * (int16_t)e->aim_dx > 0))
+            {
+                if (clear_straight_line(e->x, e->y, x, y)) { return true; }
+            }
+            else if (e->aim_dy != 0 && x == e->x && (((int16_t)y - (int16_t)e->y) * (int16_t)e->aim_dy > 0))
+            {
+                if (clear_straight_line(e->x, e->y, x, y)) { return true; }
+            }
+        }
+        else if (e->type == ENEMY_BOSS && (x == e->x || y == e->y))
+        {
+            if (clear_straight_line(e->x, e->y, x, y)) { return true; }
+        }
+    }
+    return false;
+}
+
+/* Danger score scaled x2 (1.0 -> 2, 1.5 -> 3) for zero-float parity with ga/features.py */
+static int16_t ai_tile_danger_x2(uint8_t x, uint8_t y)
+{
+    int16_t d = 0;
+    uint8_t i;
+    for (i = 0u; i < DNG_MAX_ENEMIES; i++)
+    {
+        const dng_enemy_t *e = &s_enemies[i];
+        if (e->type == ENEMY_NONE) { continue; }
+        if (e->type == ENEMY_MIMIC && (e->flags & EF_AWAKE) == 0u) { continue; }
+        if ((s_map[e->y][e->x] & TILE_F_VISIBLE) == 0u) { continue; }
+        if ((uint8_t)(u8_abs_diff(e->x, x) + u8_abs_diff(e->y, y)) == 1u) { d += 2; }
+    }
+    if (ai_in_aim_line(x, y)) { d += 3; }
+    if (tile_type(x, y) == DNG_TRAP && (s_map[y][x] & TILE_F_REVEALED) != 0u) { d += 2; }
+    return d;
+}
+
+static bool ai_is_dormant_mimic_at(uint8_t x, uint8_t y)
+{
+    int8_t ei = find_enemy_at(x, y);
+    return (ei >= 0 && s_enemies[ei].type == ENEMY_MIMIC && (s_enemies[ei].flags & EF_AWAKE) == 0u);
+}
+
+static int8_t ai_perceived_enemy_at(uint8_t x, uint8_t y)
+{
+    if ((s_map[y][x] & TILE_F_VISIBLE) == 0u) { return -1; }
+    int8_t ei = find_enemy_at(x, y);
+    if (ei < 0) { return -1; }
+    if (s_enemies[ei].type == ENEMY_MIMIC && (s_enemies[ei].flags & EF_AWAKE) == 0u) { return -1; }
+    return ei;
+}
+
 static uint8_t ga_select_action_q7(void)
 {
     static const uint8_t k_act[GA_NUM_ACTIONS] = { 'w','d','s','a','f','q','e','1','2','3',' ' };
@@ -3073,7 +3177,8 @@ static uint8_t ga_select_action_q7(void)
     uint8_t lt_x = 255u, lt_y = 255u, lt_d = 255u;
     uint8_t fr_x = 255u, fr_y = 255u, fr_d = 255u;
     uint8_t en_x = 255u, en_y = 255u, en_d = 255u;
-    uint8_t adj3 = 0u;
+    uint8_t adj3 = 0u, adj_cracked = 0u;
+    uint16_t explored_cnt = 0u;
 
     for (r = 1u; r < (DNG_H - 1u); r++)
     {
@@ -3081,6 +3186,7 @@ static uint8_t ga_select_action_q7(void)
         {
             uint8_t cell = s_map[r][c];
             if ((cell & TILE_F_EXPLORED) == 0u) { continue; }
+            explored_cnt++;
             uint8_t t = (uint8_t)(cell & TILE_TYPE_MASK);
             uint8_t md = (uint8_t)(u8_abs_diff(c, s_px) + u8_abs_diff(r, s_py));
 
@@ -3089,12 +3195,13 @@ static uint8_t ga_select_action_q7(void)
                 st_x = c; st_y = r; st_d = md;
             }
             if ((t == DNG_POTION || t == DNG_MANA || t == DNG_CHEST || t == DNG_RELIC ||
-                 (t == DNG_SHRINE && (cell & TILE_F_REVEALED) == 0u) ||
-                 (t == DNG_SHOP && ai_can_afford_shop(c, r))) && md > 0u && md < lt_d)
+                 (t == DNG_SHRINE && ai_is_usable_shrine(cell)) ||
+                 (t == DNG_SHOP && ai_can_afford_shop(c, r)) ||
+                 ((cell & TILE_F_VISIBLE) != 0u && ai_is_dormant_mimic_at(c, r))) && md > 0u && md < lt_d)
             {
                 lt_x = c; lt_y = r; lt_d = md;
             }
-            if (t != DNG_WALL && t != DNG_CRACKED_WALL && md > 0u && md < fr_d)
+            if (t != DNG_WALL && t != DNG_CRACKED_WALL && t != DNG_SHOP && md > 0u && md < fr_d)
             {
                 if (((s_map[r - 1u][c] & TILE_F_EXPLORED) == 0u) ||
                     ((s_map[r + 1u][c] & TILE_F_EXPLORED) == 0u) ||
@@ -3103,6 +3210,10 @@ static uint8_t ga_select_action_q7(void)
                 {
                     fr_x = c; fr_y = r; fr_d = md;
                 }
+            }
+            if (t == DNG_CRACKED_WALL && u8_abs_diff(c, s_px) <= 1u && u8_abs_diff(r, s_py) <= 1u)
+            {
+                adj_cracked++;
             }
         }
     }
@@ -3118,7 +3229,14 @@ static uint8_t ga_select_action_q7(void)
         if (u8_abs_diff(e->x, s_px) <= 1u && u8_abs_diff(e->y, s_py) <= 1u) { adj3++; }
     }
 
-    /* Valid action mask (zero wall bumps) */
+    uint8_t bx = 0u, by = 0u;
+    bool has_blink = (s_mana >= 2u) && ai_blink_dest(&bx, &by);
+    bool bolt_ahead = (s_mana >= 1u) && (ai_ray_enemy(s_dir, 8u, true) > 0u);
+    bool in_aim = ai_in_aim_line(s_px, s_py);
+    bool low_hp = is_low_hp();
+    int16_t d_now_x2 = ai_tile_danger_x2(s_px, s_py);
+
+    /* Valid action mask (zero wall bumps & zero Blink softlocks) */
     for (d = 0u; d < 4u; d++)
     {
         int8_t nx = (int8_t)((int8_t)s_px + DIR_DX[d]);
@@ -3133,7 +3251,7 @@ static uint8_t ga_select_action_q7(void)
     }
     valid[4]  = (s_mana >= 1u);
     valid[5]  = (s_mana >= 2u);
-    valid[6]  = (s_mana >= 2u);
+    valid[6]  = has_blink;
     valid[7]  = (s_potions > 0u && s_hp < s_max_hp);
     valid[8]  = (s_bombs > 0u);
     valid[9]  = (s_scrolls > 0u);
@@ -3144,7 +3262,7 @@ static uint8_t ga_select_action_q7(void)
 
     if (s_ai_model == 0u)
     {
-        /* Approach A: Evolved 22-weight Q7 Tactical Heuristic */
+        /* Approach A: Evolved 22-weight Q7 Tactical Heuristic (1:1 parity with ga/features.py) */
         for (a = 0u; a < GA_NUM_ACTIONS; a++)
         {
             if (!valid[a]) { continue; }
@@ -3155,52 +3273,108 @@ static uint8_t ga_select_action_q7(void)
             {
                 uint8_t nx = (uint8_t)((int8_t)s_px + DIR_DX[a]);
                 uint8_t ny = (uint8_t)((int8_t)s_py + DIR_DY[a]);
-                uint8_t t  = tile_type(nx, ny);
-                int8_t  ei = find_enemy_at(nx, ny);
-                if (ei >= 0 && !(s_enemies[ei].type == ENEMY_MIMIC && (s_enemies[ei].flags & EF_AWAKE) == 0u))
+                int8_t  ei = ai_perceived_enemy_at(nx, ny);
+                if (ei >= 0)
                 {
                     f[0] = 127;
-                    if (s_enemies[ei].hp <= s_atk) { f[1] = 127; }
+                    uint8_t dmg = s_empowered ? (uint8_t)(s_atk + ((s_atk + 1u) / 2u)) : s_atk;
+                    if (s_class == CLASS_ROGUE && s_enemies[ei].hp == s_enemies[ei].max_hp) { dmg = (uint8_t)(dmg + 2u); }
+                    if (s_enemies[ei].hp <= dmg) { f[1] = 127; }
                 }
-                if (t == DNG_STAIRS) { f[2] = 127; }
-                if (t == DNG_POTION || t == DNG_MANA || t == DNG_CHEST || t == DNG_RELIC ||
-                    (t == DNG_SHRINE && (s_map[ny][nx] & TILE_F_REVEALED) == 0u)) { f[3] = 127; }
-                if (t == DNG_SHOP && ai_can_afford_shop(nx, ny)) { f[4] = 127; }
-                if (t == DNG_DOOR_CLOSED) { f[5] = 127; }
-                if (t == DNG_TRAP && (s_map[ny][nx] & TILE_F_REVEALED) != 0u) { f[6] = 127; }
+                else
+                {
+                    uint8_t cell = s_map[ny][nx];
+                    uint8_t t = (uint8_t)(cell & TILE_TYPE_MASK);
+                    if (t == DNG_TRAP && (cell & TILE_F_REVEALED) == 0u) { t = DNG_FLOOR; }
 
-                if (st_x != 255u)
-                {
-                    uint8_t nd = (uint8_t)(u8_abs_diff(nx, st_x) + u8_abs_diff(ny, st_y));
-                    f[7] = (nd < st_d) ? 127 : ((nd > st_d) ? -127 : 0);
+                    if (t == DNG_STAIRS) { f[2] = 127; }
+                    else if (t == DNG_POTION || t == DNG_MANA || t == DNG_CHEST || t == DNG_RELIC ||
+                             ai_is_dormant_mimic_at(nx, ny) ||
+                             (t == DNG_SHRINE && ai_is_usable_shrine(cell))) { f[3] = 127; }
+                    else if (t == DNG_SHOP && ai_can_afford_shop(nx, ny)) { f[4] = 127; }
+                    else if (t == DNG_DOOR_CLOSED) { f[5] = 127; }
+                    else if (t == DNG_TRAP) { f[6] = 127; }
+
+                    if (t != DNG_WALL && t != DNG_CRACKED_WALL && t != DNG_SHOP)
+                    {
+                        if (st_x != 255u)
+                        {
+                            uint8_t nd = (uint8_t)(u8_abs_diff(nx, st_x) + u8_abs_diff(ny, st_y));
+                            f[7] = (nd < st_d) ? 127 : ((nd > st_d) ? -127 : 0);
+                        }
+                        if (lt_x != 255u)
+                        {
+                            uint8_t nd = (uint8_t)(u8_abs_diff(nx, lt_x) + u8_abs_diff(ny, lt_y));
+                            f[8] = (nd < lt_d) ? 127 : ((nd > lt_d) ? -127 : 0);
+                        }
+                        if (fr_x != 255u)
+                        {
+                            uint8_t nd = (uint8_t)(u8_abs_diff(nx, fr_x) + u8_abs_diff(ny, fr_y));
+                            f[9] = (nd < fr_d) ? 127 : ((nd > fr_d) ? -127 : 0);
+                        }
+                        if (en_x != 255u)
+                        {
+                            uint8_t nd = (uint8_t)(u8_abs_diff(nx, en_x) + u8_abs_diff(ny, en_y));
+                            f[10] = (nd < en_d) ? 127 : ((nd > en_d) ? -127 : 0);
+                            if (low_hp && nd > en_d) { f[21] = 127; }
+                        }
+                        uint8_t vcnt = ai_recent_visits(nx, ny);
+                        if (vcnt == 0u)      { f[11] = 127; }
+                        else if (vcnt == 1u) { f[11] = 0; }
+                        else                 { f[11] = ai_clamp_q7((int16_t)(-32 * (int16_t)(vcnt - 1u))); }
+
+                        int16_t d_new_x2 = ai_tile_danger_x2(nx, ny);
+                        f[12] = ai_clamp_q7((int16_t)((d_now_x2 - d_new_x2) * 32));
+                    }
                 }
-                if (lt_x != 255u)
-                {
-                    uint8_t nd = (uint8_t)(u8_abs_diff(nx, lt_x) + u8_abs_diff(ny, lt_y));
-                    f[8] = (nd < lt_d) ? 127 : ((nd > lt_d) ? -127 : 0);
-                }
-                if (fr_x != 255u)
-                {
-                    uint8_t nd = (uint8_t)(u8_abs_diff(nx, fr_x) + u8_abs_diff(ny, fr_y));
-                    f[9] = (nd < fr_d) ? 127 : ((nd > fr_d) ? -127 : 0);
-                }
-                if (en_x != 255u)
-                {
-                    uint8_t nd = (uint8_t)(u8_abs_diff(nx, en_x) + u8_abs_diff(ny, en_y));
-                    f[10] = (nd < en_d) ? 127 : ((nd > en_d) ? -127 : 0);
-                    if (is_low_hp() && nd > en_d) { f[21] = 127; }
-                }
-                uint8_t vcnt = ai_recent_visits(nx, ny);
-                f[11] = ai_clamp_q7((int16_t)(127 - (int16_t)vcnt * 64));
-                if (ai_ray_enemy(a, 6u, true) > 0u) { f[13] = 127; }
+                if (s_mana >= 1u && ai_ray_enemy(a, 6u, false) > 0u) { f[13] = 127; }
             }
-            else if (a == 4u) { f[14] = (ai_ray_enemy(s_dir, 8u, true) > 0u) ? 127 : -64; }
-            else if (a == 5u) { f[15] = ai_clamp_q7((int16_t)adj3 * 42); }
-            else if (a == 6u) { f[16] = (is_low_hp() && adj3 > 0u) ? 127 : -32; }
-            else if (a == 7u) { f[17] = ai_clamp_q7((int16_t)(((int16_t)(s_max_hp - s_hp) * 127) / (int16_t)(s_max_hp ? s_max_hp : 1u))); }
-            else if (a == 8u) { f[18] = (adj3 >= 2u) ? 127 : -64; }
-            else if (a == 9u) { f[19] = (st_x == 255u) ? 127 : -64; }
-            else              { f[20] = (s_mana < s_max_mana && adj3 == 0u) ? 64 : -64; }
+            else if (a == 4u)
+            {
+                if (bolt_ahead) { f[14] = 127; }
+            }
+            else if (a == 5u)
+            {
+                if (s_mana >= 2u && adj3 > 0u) { f[15] = ai_clamp_q7((int16_t)adj3 * 42); }
+            }
+            else if (a == 6u)
+            {
+                if (has_blink)
+                {
+                    int16_t d_new_x2 = ai_tile_danger_x2(bx, by);
+                    bool toward_st = (st_x != 255u &&
+                                      (uint8_t)(u8_abs_diff(bx, st_x) + u8_abs_diff(by, st_y)) < st_d);
+                    if ((low_hp && d_new_x2 < d_now_x2) || in_aim || toward_st) { f[16] = 127; }
+                    if (low_hp && en_x != 255u &&
+                        (uint8_t)(u8_abs_diff(bx, en_x) + u8_abs_diff(by, en_y)) > en_d)
+                    {
+                        f[21] = 127;
+                    }
+                }
+            }
+            else if (a == 7u)
+            {
+                if (s_potions > 0u && s_hp < s_max_hp)
+                {
+                    int32_t mhp = (s_max_hp > 0u) ? (int32_t)s_max_hp : 1L;
+                    int32_t miss = ((int32_t)(s_max_hp - s_hp) * (low_hp ? 191L : 127L)) / mhp;
+                    f[17] = (miss > 127L) ? 127 : (int8_t)miss;
+                    if (low_hp) { f[21] = 127; }
+                }
+            }
+            else if (a == 8u)
+            {
+                uint8_t bv = (uint8_t)(adj3 + adj_cracked);
+                if (s_bombs > 0u && bv > 0u) { f[18] = ai_clamp_q7((int16_t)bv * 64); }
+            }
+            else if (a == 9u)
+            {
+                if (s_scrolls > 0u && (st_x == 255u || explored_cnt < 120u)) { f[19] = 127; }
+            }
+            else
+            {
+                if (!s_empowered && s_mana < s_max_mana && adj3 == 0u && !in_aim) { f[20] = 127; }
+            }
 
             int32_t sc = 0;
             for (i = 0u; i < GA_HEUR_NUM_FEATURES; i++)
@@ -3212,36 +3386,55 @@ static uint8_t ga_select_action_q7(void)
     }
     else
     {
-        /* Approach B: Evolved 24 -> 16 -> 11 ReLU Q7 Tiny-MLP */
+        /* Approach B: Evolved 24 -> 16 -> 11 ReLU Q7 Tiny-MLP (1:1 parity with ga/features.py) */
         int8_t x[GA_MLP_IN];
         int8_t h[GA_MLP_HIDDEN];
         memset(x, 0, sizeof(x));
 
-        x[0] = ai_clamp_q7((int16_t)(((int16_t)s_hp * 254) / (int16_t)(s_max_hp ? s_max_hp : 1u) - 127));
-        x[1] = ai_clamp_q7((int16_t)(((int16_t)s_mana * 254) / (int16_t)(s_max_mana ? s_max_mana : 1u) - 127));
+        int32_t mhp = (s_max_hp > 0u) ? (int32_t)s_max_hp : 1L;
+        int32_t mmp = (s_max_mana > 0u) ? (int32_t)s_max_mana : 1L;
+        x[0] = ai_clamp_q7((int16_t)(((int32_t)s_hp * 254L) / mhp - 127L));
+        x[1] = ai_clamp_q7((int16_t)(((int32_t)s_mana * 254L) / mmp - 127L));
         x[2] = s_empowered ? 127 : -127;
-        x[3] = (s_potions > 0u) ? 127 : -127;
-        x[4] = (s_bombs > 0u || s_scrolls > 0u) ? 127 : -127;
-        x[5] = (ai_ray_enemy(s_dir, 8u, true) > 0u) ? 127 : -127;
+        x[3] = ai_clamp_q7((int16_t)s_potions * 42);
+        x[4] = (int8_t)((s_bombs > 0u ? 64 : 0) + (s_scrolls > 0u ? 63 : 0));
+        x[5] = bolt_ahead ? 127 : -127;
 
         for (d = 0u; d < 4u; d++)
         {
             int8_t nx = (int8_t)((int8_t)s_px + DIR_DX[d]);
             int8_t ny = (int8_t)((int8_t)s_py + DIR_DY[d]);
-            if (nx <= 0 || nx >= (int8_t)(DNG_W - 1u) || ny <= 0 || ny >= (int8_t)(DNG_H - 1u)) { x[6u + d] = -127; }
-            else if (find_enemy_at((uint8_t)nx, (uint8_t)ny) >= 0) { x[6u + d] = 127; }
-            else if (tile_blocks_move(tile_type((uint8_t)nx, (uint8_t)ny))) { x[6u + d] = -127; }
-            else { x[6u + d] = 0; }
+            if (nx < 0 || nx >= (int8_t)DNG_W || ny < 0 || ny >= (int8_t)DNG_H)
+            {
+                x[6u + d] = -127;
+            }
+            else if (ai_perceived_enemy_at((uint8_t)nx, (uint8_t)ny) >= 0)
+            {
+                x[6u + d] = 127;
+            }
+            else
+            {
+                uint8_t cell = s_map[ny][nx];
+                uint8_t t = (uint8_t)(cell & TILE_TYPE_MASK);
+                if (t == DNG_TRAP && (cell & TILE_F_REVEALED) == 0u) { t = DNG_FLOOR; }
+                if (t == DNG_WALL || t == DNG_CRACKED_WALL) { x[6u + d] = -127; }
+                else if (t == DNG_SHOP) { x[6u + d] = ai_can_afford_shop((uint8_t)nx, (uint8_t)ny) ? 127 : -127; }
+                else if (t == DNG_TRAP) { x[6u + d] = -64; }
+                else if (t == DNG_STAIRS || t == DNG_POTION || t == DNG_MANA || t == DNG_CHEST || t == DNG_RELIC ||
+                         ai_is_dormant_mimic_at((uint8_t)nx, (uint8_t)ny) ||
+                         (t == DNG_SHRINE && ai_is_usable_shrine(cell))) { x[6u + d] = 127; }
+                else { x[6u + d] = (ai_recent_visits((uint8_t)nx, (uint8_t)ny) == 0u) ? 64 : 0; }
+            }
             uint8_t rd = ai_ray_enemy(d, 6u, false);
-            x[10u + d] = (rd > 0u) ? ai_clamp_q7((int16_t)((7 - (int16_t)rd) * 21)) : 0;
+            x[10u + d] = (rd > 0u) ? ai_clamp_q7((int16_t)(((7 - (int16_t)rd) * 127) / 6)) : 0;
         }
 
-        if (st_x != 255u) { x[14] = (st_x > s_px) ? 127 : ((st_x < s_px) ? -127 : 0); x[15] = (st_y > s_py) ? 127 : ((st_y < s_py) ? -127 : 0); }
-        if (fr_x != 255u) { x[16] = (fr_x > s_px) ? 127 : ((fr_x < s_px) ? -127 : 0); x[17] = (fr_y > s_py) ? 127 : ((fr_y < s_py) ? -127 : 0); }
-        if (lt_x != 255u) { x[18] = (lt_x > s_px) ? 127 : ((lt_x < s_px) ? -127 : 0); x[19] = (lt_y > s_py) ? 127 : ((lt_y < s_py) ? -127 : 0); }
-        if (en_x != 255u) { x[20] = (en_x > s_px) ? 127 : ((en_x < s_px) ? -127 : 0); x[21] = (en_y > s_py) ? 127 : ((en_y < s_py) ? -127 : 0); }
-        x[22] = ai_clamp_q7((int16_t)adj3 * 32);
-        x[23] = (s_enemies[0].type == ENEMY_BOSS || is_low_hp()) ? 127 : -127;
+        if (st_x != 255u) { x[14] = ai_clamp_q7((int16_t)(((int16_t)st_x - (int16_t)s_px) * 127 / 12)); x[15] = ai_clamp_q7((int16_t)(((int16_t)st_y - (int16_t)s_py) * 127 / 12)); }
+        if (fr_x != 255u) { x[16] = ai_clamp_q7((int16_t)(((int16_t)fr_x - (int16_t)s_px) * 127 / 12)); x[17] = ai_clamp_q7((int16_t)(((int16_t)fr_y - (int16_t)s_py) * 127 / 12)); }
+        if (lt_x != 255u) { x[18] = ai_clamp_q7((int16_t)(((int16_t)lt_x - (int16_t)s_px) * 127 / 12)); x[19] = ai_clamp_q7((int16_t)(((int16_t)lt_y - (int16_t)s_py) * 127 / 12)); }
+        if (en_x != 255u) { x[20] = ai_clamp_q7((int16_t)(((int16_t)en_x - (int16_t)s_px) * 127 / 8));  x[21] = ai_clamp_q7((int16_t)(((int16_t)en_y - (int16_t)s_py) * 127 / 8)); }
+        x[22] = ai_clamp_q7((int16_t)adj3 * 42);
+        x[23] = (in_aim || (low_hp && adj3 > 0u)) ? 127 : ((s_enemies[0].type == ENEMY_BOSS) ? 64 : 0);
 
         for (i = 0u; i < GA_MLP_HIDDEN; i++)
         {
@@ -3292,14 +3485,17 @@ static bool pop_cmd(uint8_t *out_cmd)
     return true;
 }
 
-static void handle_command(uint8_t cmd)
+static void handle_command_ex(uint8_t cmd, bool from_ai)
 {
-    if (cmd != CMD_STEP_FWD && cmd != CMD_ROTATE && !s_terminal_connected)
+    if (!from_ai)
     {
-        s_terminal_connected = true;
-        s_full_redraw = true;
+        if (cmd != CMD_STEP_FWD && cmd != CMD_ROTATE && !s_terminal_connected)
+        {
+            s_terminal_connected = true;
+            s_full_redraw = true;
+        }
+        s_missed_probes = 0u;
     }
-    s_missed_probes = 0u;
 
     /* Manual full-screen redraw without advancing a turn */
     if (cmd == 0x0Cu || cmd == '\r' || cmd == '\n' || cmd == 'l' || cmd == 'L')
@@ -3421,7 +3617,11 @@ static void handle_command(uint8_t cmd)
 
     if (cmd == 'p' || cmd == 'P')
     {
-        if (s_game_over)
+        if (s_ai_demo)
+        {
+            set_status("FRAM SAVE DISABLED IN AI DEMO! PRESS N TO EXIT.");
+        }
+        else if (s_game_over)
         {
             set_status("CANNOT SAVE WHILE DEAD! PRESS R TO LOAD OR W/SPACE FOR NEW RUN.");
         }
@@ -3445,10 +3645,17 @@ static void handle_command(uint8_t cmd)
     }
     else if (cmd == 'x' || cmd == 'X')
     {
-        ckpt_erase();
-        s_best_floor    = (uint16_t)s_floor;
-        s_has_saved_run = false;
-        set_status("FRAM CHECKPOINTS ERASED.");
+        if (s_ai_demo)
+        {
+            set_status("FRAM ERASE DISABLED IN AI DEMO! PRESS N TO EXIT.");
+        }
+        else
+        {
+            ckpt_erase();
+            s_best_floor    = (uint16_t)s_floor;
+            s_has_saved_run = false;
+            set_status("FRAM CHECKPOINTS ERASED.");
+        }
         s_dirty = true;
     }
     else if (s_game_over)
@@ -3548,10 +3755,10 @@ void dungeon_game_process(void)
         }
         else if (s_esc_state == 2u)
         {
-            if (b == 'A')      { s_esc_state = 0u; handle_command('w'); continue; }
-            else if (b == 'B') { s_esc_state = 0u; handle_command('s'); continue; }
-            else if (b == 'C') { s_esc_state = 0u; handle_command('d'); continue; }
-            else if (b == 'D') { s_esc_state = 0u; handle_command('a'); continue; }
+            if (b == 'A')      { s_esc_state = 0u; handle_command_ex('w', false); continue; }
+            else if (b == 'B') { s_esc_state = 0u; handle_command_ex('s', false); continue; }
+            else if (b == 'C') { s_esc_state = 0u; handle_command_ex('d', false); continue; }
+            else if (b == 'D') { s_esc_state = 0u; handle_command_ex('a', false); continue; }
             else if (b == '0') { s_esc_state = 3u; continue; }
             s_esc_state = 0u;
             continue;
@@ -3579,7 +3786,7 @@ void dungeon_game_process(void)
             continue;
         }
 
-        handle_command(b);
+        handle_command_ex(b, false);
     }
 
     if (do_probe)
@@ -3590,7 +3797,7 @@ void dungeon_game_process(void)
         if (s_ai_demo && !s_game_over && !s_class_select && !s_map_mode && !s_help_mode && !s_hof_mode)
         {
             uint8_t ai_act = ga_select_action_q7();
-            handle_command(ai_act);
+            handle_command_ex(ai_act, true);
         }
 
         /* Low-HP heartbeat: blink Red LED1 + pulse red banner every 500 ms, beep BEL every 2.0 s */
