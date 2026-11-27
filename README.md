@@ -56,3 +56,7 @@ You can also invoke [tools/launch_terminal.ps1](tools/launch_terminal.ps1) direc
 2. Connect the **MSP-EXP430FR5994 LaunchPad** via USB (ensure the eZ-FET `TXD`/`RXD` jumpers are installed).
 3. Build and flash `mspgame`.
 4. Run `.\play.bat` (or `.\play.bat 115200` for `space_game`). If using another serial terminal manually on **MSP Application UART1**, set `8N1`, flow control `None`, and local echo `Off`.
+
+## AI Usage & Assistance Disclaimer
+
+This repository and its accompanying engineering reports were directed, architected, and supervised by the human author (joaogpd). AI coding and research assistants were used transparently as engineering aids during development.
