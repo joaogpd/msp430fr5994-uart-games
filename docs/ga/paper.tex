@@ -16,7 +16,7 @@ TI MSP430FR5994 LaunchPad Platform}}
 \maketitle
 
 \begin{abstract}
-Deploying autonomous game-playing agents on ultra-low-power 16-bit microcontrollers without a hardware Floating-Point Unit (FPU) requires compact policy representations, strict memory discipline, and bit-faithful offline-to-hardware transfer. We present an end-to-end evolutionary pipeline and on-chip deployment for \texttt{mspgame}, a procedural 80$\times$24 ANSI/VT100 roguelike running on the Texas Instruments MSP430FR5994 (16-bit core, 256~KB FRAM, 8~KB SRAM). We construct a bit-faithful Python headless simulator matching the firmware's 16-bit Galois LFSR (\texttt{0xB400}), 48$\times$22 dungeon tile layout, integer Bresenham line-of-sight, and combat rules, and evolve two zero-float Q7 \texttt{int8\_t} policy architectures: Approach~A, a 22-parameter action-conditioned linear heuristic (22~B in FRAM), and Approach~B, a 587-parameter fixed-topology Tiny-MLP (24$\rightarrow$16$\rightarrow$11 ReLU, 587~B in FRAM). Across a 12-experiment benchmark matrix (2,021.39~s total trainer wall-clock time) spanning compute budgets (Smoke, Medium, Deep), observability modes (Fair Fog-of-War vs.\ Omniscient), and three playable classes (Knight, Arcanist, Rogue), the 22-byte Heuristic~A outperforms the 587-byte Tiny-MLP~B by 1.36$\times$ to 10.95$\times$ on 10 unseen held-out seeds---reaching Floor~6 and defeating the Floor-5 Bone Warden boss under Fair Fog-of-War (3,156.7 mean held-out fitness)---while symmetric Q7 \texttt{int8\_t} quantization achieves 101.08\% mean (100.00\% median, 95.66\%--115.38\% range) fitness retention relative to Float32. Both models are compiled directly into the MSP430FR5994 firmware (609~B of FRAM weights, 2,864~B of inference code, 2,385/4,096~B total RAM, 43.8/262.0~KB total FRAM, 0~B dynamic heap), validated via live Hardware-in-the-Loop UART testing (\texttt{COM4 @ 115200} baud, 59 turns, 0 deaths), and exposed interactively via an on-chip \texttt{[4] AI DEMO} mode supporting live Heuristic/MLP toggling.
+Deploying autonomous game-playing agents on ultra-low-power 16-bit microcontrollers without a hardware Floating-Point Unit (FPU) requires compact policy representations, strict memory discipline, and bit-faithful offline-to-hardware transfer. We present an end-to-end evolutionary pipeline and on-chip deployment for \texttt{mspgame}, a procedural 80$\times$24 ANSI/VT100 roguelike running on the Texas Instruments MSP430FR5994 (16-bit core, 256~KB FRAM, 8~KB SRAM). We construct a bit-faithful Python headless simulator matching the firmware's 16-bit Galois LFSR (\texttt{0xB400}), 48$\times$22 dungeon tile layout, integer Bresenham line-of-sight, and combat rules, and evolve two zero-float Q7 \texttt{int8\_t} policy architectures: Approach~A, a 22-parameter action-conditioned linear heuristic (22~B in FRAM), and Approach~B, a 587-parameter fixed-topology Tiny-MLP (24$\rightarrow$16$\rightarrow$11 ReLU, 587~B in FRAM). Across a 12-experiment benchmark matrix (2,021.39~s total trainer wall-clock time) spanning compute budgets (Smoke, Medium, Deep), observability modes (Fair Fog-of-War vs.\ Omniscient), and three playable classes (Knight, Arcanist, Rogue), the 22-byte Heuristic~A outperforms the 587-byte Tiny-MLP~B by 1.36$\times$ to 10.95$\times$ on 10 unseen held-out seeds---reaching Floor~6 and defeating the Floor-5 Bone Warden boss under Fair Fog-of-War (3,156.7 mean held-out fitness)---while symmetric Q7 \texttt{int8\_t} quantization achieves 101.08\% mean (100.00\% median, 95.66\%--115.38\% range) fitness retention relative to Float32. Both models are compiled directly into the MSP430FR5994 firmware (609~B of FRAM weights, 3,668~B of inference code, 2,385/4,096~B total RAM, 45.7/262.0~KB total FRAM, 0~B dynamic heap), validated via live Hardware-in-the-Loop UART testing (\texttt{COM4 @ 115200} baud, 55 Heuristic~A turns and 34 Tiny-MLP~B turns, 0 deaths), and exposed interactively via an on-chip \texttt{[4] AI DEMO} mode supporting live Heuristic/MLP toggling.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -57,7 +57,10 @@ All features are bounded in $[-1, 1]$ for Q7 quantization:
     \item \textbf{Approach~A (\texttt{HeuristicGenome}, 22 params):} For each valid action $a \in \mathcal{V}(s)$, computes an action-conditioned vector $\phi(s, a) \in [-1, 1]^{22}$ (melee/kill, stairs/loot/shop/door/trap indicators, Manhattan step deltas toward stairs/loot/frontier/enemy, visit novelty, danger delta, bolt alignment, spell/item urgency, low-HP escape) and selects $a^* = \arg\max_{a \in \mathcal{V}(s)} w^\top \phi(s, a)$.
     \item \textbf{Approach~B (\texttt{TinyMLPGenome}, 587 params):} Computes a 24-element ego-state vector $x \in [-1, 1]^{24}$ (HP/MP ratios, empowerment, consumables, bolt target ahead, 4 cardinal neighbor encodings, 4 enemy raycasts, relative $(dx, dy)$ to stairs/frontier/loot/enemy, 3$\times$3 adjacent enemies, danger/boss flag) and evaluates a $24 \to 16 \to 11$ ReLU MLP ($24\cdot 16 + 16 + 16\cdot 11 + 11 = 587$ parameters):
     \begin{equation}
-        h = \operatorname{ReLU}(W_1 x + b_1), \quad z = W_2 h + b_2, \quad a^* = \arg\max_{a \in \mathcal{V}(s)} z_a.
+    \begin{aligned}
+        h &= \operatorname{ReLU}(W_1 x + b_1), \quad z = W_2 h + b_2, \\
+        a^* &= \arg\max_{a \in \mathcal{V}(s)} z_a.
+    \end{aligned}
     \end{equation}
 \end{itemize}
 
@@ -105,7 +108,7 @@ Experiment ID & Model & Obs & Class & Tier (Pop$\times$G$\times$S) & Wall (s) & 
 \texttt{mlp\_omni\_knight\_medium}  & MLP B  & Omni & Knight   & Med (36$\times$50$\times$5)    & 110.62 &  2,253.2 &  4,124 & 3 &   468.0 & 1.0 / 1 &   447.7 &  95.66\% \\
 \texttt{heur\_fair\_arcanist\_med}  & Heur A & Fair & Arcanist & Med (36$\times$50$\times$5)    & 137.11 &  7,939.4 & 10,720 & 5 & 1,985.9 & 1.7 / 3 & 2,291.4 & 115.38\% \\
 \texttt{mlp\_fair\_arcanist\_med}   & MLP B  & Fair & Arcanist & Med (36$\times$50$\times$5)    &  68.83 &  1,479.0 &  4,406 & 3 &   542.6 & 1.0 / 1 &   541.6 &  99.82\% \\
-\texttt{heur\_fair\_rogue\_med}     & Heur A & Fair & Rogue    & Med (36$\times$50$\times$5)    & 146.29 &  9,489.4 & 13,252 & 6 & 3,059.4 & 1.8 / 3 & 3,068.6 & 100.30\% \\
+\texttt{heur\_fair\_rogue\_med}     & Heur A & Fair & Rogue    & Med (36$\times$50$\times$5)    & 146.30 &  9,489.4 & 13,252 & 6 & 3,059.4 & 1.8 / 3 & 3,068.6 & 100.30\% \\
 \texttt{mlp\_fair\_rogue\_med}      & MLP B  & Fair & Rogue    & Med (36$\times$50$\times$5)    & 106.10 &  3,327.8 &  4,964 & 2 & 2,261.4 & 1.1 / 2 & 2,261.4 & 100.00\% \\
 \bottomrule
 \end{tabular}
@@ -114,7 +117,7 @@ Experiment ID & Model & Obs & Class & Tier (Pop$\times$G$\times$S) & Wall (s) & 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figures/fitness_curves.png}
-\caption{Evolutionary training fitness curves across compute budgets, model families, observability modes, and playable classes.}
+\caption{Evolutionary training fitness curves for three Knight runs: Fair Heuristic Deep, Fair Tiny-MLP Deep, and Omniscient Heuristic Medium.}
 \label{fig:curves}
 \end{figure}
 
@@ -137,14 +140,14 @@ Experiment ID & Model & Obs & Class & Tier (Pop$\times$G$\times$S) & Wall (s) & 
 \textbf{Q7 Quantization Retention:} Across all 12 experiments, Q7 \texttt{int8\_t} achieves 101.08\% mean and 100.00\% median retention (Heuristic~A: 99.68\%--115.38\%; Tiny-MLP~B: 95.66\%--102.00\%). Retention above 100\% (e.g., \texttt{heur\_fair\_arcanist\_med} at 115.38\%) occurs when a Q7 tie-break alters a single discrete action and extends survival (\texttt{mean\_turns} 120.5 $\to$ 137.8).
 
 \subsection{Live Hardware-in-the-Loop (HIL) Validation}
-\texttt{ga/hil\_eval.py} evaluated the Deep Fair Knight Heuristic champion live over \texttt{COM4 @ 115200} baud against the physical MSP430FR5994 LaunchPad (\texttt{ga/results/hil\_knight\_deep.json}). Across 59 autonomous turns (\texttt{SEED:350F}, \texttt{BIOME: STONE CRYPT}), the agent collected 6~gold, handled 3 ANSI Device Status Report (\texttt{ESC[5n}) presence probes, triggered 0 low-HP \texttt{BEL} alerts, and incurred 0 deaths.
+\texttt{ga/hil\_eval.py} evaluated both Deep Fair Knight Q7 \texttt{int8\_t} champions live over \texttt{COM4 @ 115200} baud against the physical MSP430FR5994 LaunchPad by reconstructing a Fair Fog-of-War \texttt{DungeonSim} proxy from live 80$\times$24 ANSI frames (\texttt{ga/results/hil\_knight\_deep.json} and \texttt{hil\_mlp\_deep.json}). On \texttt{SEED:9E6B} (\texttt{STONE CRYPT}), Heuristic~A completed 55 autonomous turns (22~gold, 1 \texttt{ESC[5n} DSR probe, 0~deaths) and Tiny-MLP~B completed 34 turns (47~gold, 2 \texttt{ESC[5n} probes, 0~deaths), both with 0 low-HP \texttt{BEL} alerts.
 
 \section{On-Chip FRAM Deployment \& Resource Analysis}
 Both Deep Fair Knight champions are exported to \texttt{app/ga\_weights.h} and compiled into \texttt{app/dungeon\_game.c} (\texttt{ga\_select\_action\_q7()}) with TI MSP430 Linker \texttt{v21.6.1}. Table~\ref{tab:mem} lists the exact post-Stage-4 footprint from \texttt{Debug/mspgame.map}.
 
 \begin{table}[t]
 \centering
-\caption{Post-Stage-4 MSP430FR5994 Memory Footprint (\texttt{Debug/mspgame.map})}
+\caption{Post-Stage-4 MSP430FR5994 Memory Footprint (Linker Map)}
 \label{tab:mem}
 \scriptsize
 \begin{tabular}{@{}lcrrr@{}}
@@ -153,12 +156,12 @@ Region / Symbol & Address & Used / Size & Capacity & Util. \\
 \midrule
 \texttt{RAM} (Main SRAM)         & \texttt{0x001c00} & 2,385 B & 4,096 B   & 58.23\% \\
 \texttt{LEARAM} + \texttt{LEASTACK} & \texttt{0x002c00} & 0 B     & 4,096 B   &  0.00\% \\
-\texttt{FRAM} (Lower)            & \texttt{0x004000} & 15,684 B & 49,024 B  & 31.99\% \\
-\texttt{FRAM2} (Upper)           & \texttt{0x010000} & 28,082 B & 212,984 B & 13.19\% \\
-\textbf{Total \texttt{FRAM+FRAM2}} & ---             & \textbf{43,766 B} & \textbf{262,008 B} & \textbf{16.70\%} \\
+\texttt{FRAM} (Lower)            & \texttt{0x004000} & 15,858 B & 49,024 B  & 32.35\% \\
+\texttt{FRAM2} (Upper)           & \texttt{0x010000} & 29,808 B & 212,984 B & 14.00\% \\
+\textbf{Total \texttt{FRAM+FRAM2}} & ---             & \textbf{45,666 B} & \textbf{262,008 B} & \textbf{17.43\%} \\
 \midrule
-AI Weights (\texttt{.const})     & \texttt{0x007730} & 609 B   & 262,008 B &  0.23\% \\
-\texttt{ga\_select\_action\_q7}  & \texttt{0x010000} & 2,864 B & 262,008 B &  1.09\% \\
+AI Weights (\texttt{.const})     & \texttt{0x0077de} & 609 B   & 262,008 B &  0.23\% \\
+\texttt{ga\_select\_action\_q7}  & \texttt{0x010000} & 3,668 B & 262,008 B &  1.40\% \\
 \texttt{s\_ai\_hx}, \texttt{s\_ai\_hy} & \texttt{0x0022da} & 32 B    & 4,096 B   &  0.78\% \\
 \bottomrule
 \end{tabular}
@@ -167,7 +170,7 @@ AI Weights (\texttt{.const})     & \texttt{0x007730} & 609 B   & 262,008 B &  0.
 Inference executes at most 242 integer MACs/turn (Approach~A) or 560 integer MACs/turn (Approach~B) with 0~B heap (\texttt{.sysmem} $= 0$). Inside \texttt{[4] AI DEMO}, the MCU steps autonomously every 500~ms; pressing \texttt{T} hot-swaps Heuristic~A (22~B) and Tiny-MLP~B (587~B) live on-chip, and \texttt{N} exits to Class Select.
 
 \section{Discussion \& Limitations}
-Our findings underscore that inductive bias dominates parameter count on ultra-low-power MCUs: 22 domain-aligned action weights outperform a 587-weight MLP by up to 10.95$\times$ under black-box evolution. Key limitations include: (1) train-to-held-out overfitting from 4--6 fixed training seeds per run, (2) compact SRAM approximations in the on-chip visit buffer (16-entry ring buffer vs.\ 1,056-byte full grid), and (3) 59-turn HIL duration bounded by real-time UART rendering cadence.
+Our findings underscore that inductive bias dominates parameter count on ultra-low-power MCUs: 22 domain-aligned action weights outperform a 587-weight MLP by up to 10.95$\times$ under black-box evolution. Key limitations include: (1) train-to-held-out overfitting from 4--6 fixed training seeds per run, (2) a compact 16-entry SRAM visit ring buffer (32~B vs.\ 1,056~B full grid) retained after an audit restored 1:1 C/Python Q7 feature-encoding parity in \texttt{ga\_select\_action\_q7()}, and (3) 55-turn and 34-turn HIL runs bounded by real-time UART rendering cadence.
 
 \section{Conclusion \& Future Work}
 We demonstrated zero-float Q7 evolutionary policies running natively on a 16-bit TI MSP430FR5994 microcontroller. A 22-byte evolved heuristic reaches Floor~6 and defeats the Floor-5 boss on unseen seeds under Fair Fog-of-War (3,156.7 mean held-out fitness, 100.00\% Q7 retention) while coexisting with a 587-byte Tiny-MLP in just 609~B of FRAM. Future work will explore per-generation seed resampling and CMA-ES for MLP evolution, hardware-accelerated Q7 MACs via the untouched 4~KB MSP430 LEA, and class-specific 22-byte FRAM weight tables.

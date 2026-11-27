@@ -103,9 +103,9 @@ python -m ga.run_experiments
 
 **Experiment Matrix (`EXPERIMENTS` in `ga/run_experiments.py`):**
 
-1. **Progressive Budgets (Knight, Fair):** `smoke`, `medium`, and `deep` (overridden to `pop=72, gens=120`) for both `heuristic` and `mlp` (6 runs).
-2. **Observability Ablation (Knight, Medium):** `omniscient` for both `heuristic` and `mlp` (2 runs).
-3. **Class Specialists (Fair, Medium):** `arcanist` and `rogue` for both `heuristic` and `mlp` (4 runs).
+1. **Progressive Budgets (Knight, Fair):** `smoke` (`24×25×4`), `medium` (overridden to `pop=36, gens=50, seeds=5`), and `deep` (overridden to `pop=60, gens=100, seeds=6`) for both `heuristic` and `mlp` (6 runs).
+2. **Observability Ablation (Knight, Medium `36×50×5`):** `omniscient` for both `heuristic` and `mlp` (2 runs).
+3. **Class Specialists (Fair, Medium `36×50×5`):** `arcanist` and `rogue` for both `heuristic` and `mlp` (4 runs).
 
 Each experiment `idx` (`1..12`) uses deterministic GA seed `1000 + idx * 17`. Outputs are written to `ga/results/<exp_id>/`, aggregated in `ga/results/benchmark_summary.json`, and exported to `app/ga_weights.h`.
 

@@ -67,9 +67,9 @@ Letter keys are case-insensitive.
 | `C` | **Re-center camera** on the player without advancing a turn |
 | `H` | Toggle **FRAM Hall of Fame** (Top 5 runs; works during play, Class Select, and Game Over; press `H` or any key to close) |
 | `?` | Toggle **In-Game Help & Legend** overlay (press `?` or any key to close) |
-| `P` | **Save** current active run checkpoint to FRAM *(blocked while dead)* |
-| `R` | **Load** last saved checkpoint from FRAM *(works anytime, including Class Select and Game Over)* |
-| `X` | **Erase** FRAM run checkpoints *(resets `BEST` to current floor; Hall of Fame is preserved)* |
+| `P` | **Save** current active run checkpoint to FRAM *(blocked while dead or in AI Demo)* |
+| `R` | **Load** last saved checkpoint from FRAM *(works anytime, including Class Select and Game Over; exits AI Demo if active)* |
+| `X` | **Erase** FRAM run checkpoints *(resets `BEST` to current floor; Hall of Fame is preserved; blocked in AI Demo)* |
 | `Ctrl+L`, `Enter`, or `L` | Force a full-screen ANSI redraw without advancing a turn |
 | `Ctrl+]` | Exit the built-in PowerShell `inline` terminal cleanly |
 

@@ -73,6 +73,14 @@ try {
     $sizeKb = [Math]::Round((Get-Item $pdfPath).Length / 1KB, 1)
     Write-Host "SUCCESS: Built $pdfPath ($sizeKb KB)" -ForegroundColor Green
 
+    if (Test-Path $logPath) {
+        $warnings = Select-String -Path $logPath -Pattern "Overfull \\hbox|LaTeX Warning:|Undefined" | ForEach-Object { $_.Line }
+        if ($warnings.Count -gt 0) {
+            Write-Host "LaTeX Warnings ($($warnings.Count)):" -ForegroundColor Yellow
+            $warnings | Select-Object -First 15 | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+        }
+    }
+
     if (-not $KeepAux) {
         foreach ($ext in @(".aux", ".log", ".out", ".toc", ".fls", ".fdb_latexmk", ".synctex.gz")) {
             $aux = Join-Path $texDir "$baseName$ext"

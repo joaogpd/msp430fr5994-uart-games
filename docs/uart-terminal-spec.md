@@ -15,8 +15,8 @@ The MSP-EXP430FR5994 LaunchPad routes the eZ-FET backchannel USB-to-UART bridge 
 - **Flow control**: `None`
 - **Local echo**: `Off` (firmware handles all screen updates)
 - **Baud rate**:
-  - `9600` bps (`UART_CLK_ACLK`, 32.768 kHz LFXT) for ultra-low-power `LPM3` turn-based games (`dungeon_game`)
-  - `115200` bps (`UART_CLK_SMCLK`, 8 MHz DCO) for real-time 50 Hz games (`space_game`)
+  - `115200` bps (`UART_CLK_SMCLK`, 8 MHz DCO, `LPM0`) for both `dungeon_game` (differential 80×24 ANSI roguelike + 500 ms `TIMER_A1` DSR/AI tick) and `space_game` (real-time 50 Hz arcade shooter)
+  - Optional `9600` bps (`UART_CLK_ACLK`, 32.768 kHz LFXT, `LPM3`) remains supported by the `drivers/msp430/uart` driver for ultra-low-power applications
 
 ## Terminal Compatibility Guidelines
 

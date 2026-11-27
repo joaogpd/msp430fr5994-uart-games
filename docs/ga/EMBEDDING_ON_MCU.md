@@ -24,11 +24,11 @@ Because software floating-point emulation (`float`/`double`) bloats code size an
 
 | Symbol | Shape | Type | FRAM Address (`mspgame.map`) | Size (Bytes) | Description |
 | :--- | :---: | :---: | :---: | ---: | :--- |
-| `GA_HEUR_WEIGHTS` | `[22]` | `const int8_t` | `0x00007c2c` | `22` | Approach A action-feature weights |
-| `GA_MLP_W1` | `[16][24]` | `const int8_t` | `0x00007730` | `384` | Approach B Layer 1 weights |
-| `GA_MLP_B1` | `[16]` | `const int8_t` | `0x00007c52` | `16` | Approach B Layer 1 biases |
-| `GA_MLP_W2` | `[11][16]` | `const int8_t` | `0x00007a18` | `176` | Approach B Layer 2 weights |
-| `GA_MLP_B2` | `[11]` | `const int8_t` | `0x00007c8a` | `11` | Approach B Layer 2 biases |
+| `GA_HEUR_WEIGHTS` | `[22]` | `const int8_t` | `0x00007cda` | `22` | Approach A action-feature weights |
+| `GA_MLP_W1` | `[16][24]` | `const int8_t` | `0x000077de` | `384` | Approach B Layer 1 weights |
+| `GA_MLP_B1` | `[16]` | `const int8_t` | `0x00007d00` | `16` | Approach B Layer 1 biases |
+| `GA_MLP_W2` | `[11][16]` | `const int8_t` | `0x00007ac6` | `176` | Approach B Layer 2 weights |
+| `GA_MLP_B2` | `[11]` | `const int8_t` | `0x00007d38` | `11` | Approach B Layer 2 biases |
 | **Total AI Weights** | — | — | **FRAM `.const`** | **609 B** | **0.23% of 262,008 B FRAM** |
 
 Key compile-time constants in `app/ga_weights.h`:
@@ -46,7 +46,7 @@ Key compile-time constants in `app/ga_weights.h`:
 
 ## 3. Zero-Float Q7 Fixed-Point Inference (`app/dungeon_game.c`)
 
-On-chip inference is implemented in `ga_select_action_q7()` (`app/dungeon_game.c`, lines 3130–3272), occupying `0x00000b30` (**2,864 bytes**) of `.text` in `FRAM2` (`0x00010000`).
+On-chip inference is implemented in `ga_select_action_q7()` (`app/dungeon_game.c`), occupying `0x00000e54` (**3,668 bytes**) of `.text` in `FRAM2` (`0x00010000`) with full 1:1 Q7 feature-encoding parity against `ga/features.py` (including `int32_t` HP/MP ratio scaling, `ai_tile_danger_x2()` local danger deltas, `ai_blink_dest()` destination validation in `valid[6]`, and zero-centered defaults when spell/item preconditions are inactive).
 
 ### 3.1 Single-Pass Fair Perception & Action Masking
 
@@ -116,14 +116,14 @@ All figures below are extracted directly from the MSP430 Linker (`PC v21.6.1`) o
 | **`RAM`** (Main SRAM) | `0x00001c00` | `4,096` (`0x1000`) | **`2,385`** (`0x0951`) | `1,711` (`0x06af`) | **58.23%** |
 | **`LEARAM`** (LEA SRAM) | `0x00002c00` | `3,784` (`0x0ec8`) | **`0`** (`0x0000`) | `3,784` (`0x0ec8`) | **0.00%** |
 | **`LEASTACK`** (LEA Stack) | `0x00003ac8` | `312` (`0x0138`) | **`0`** (`0x0000`) | `312` (`0x0138`) | **0.00%** |
-| **`FRAM`** (Lower FRAM) | `0x00004000` | `49,024` (`0xbf80`) | **`15,684`** (`0x3d44`) | `33,340` (`0x823c`) | **31.99%** |
-| **`FRAM2`** (Upper FRAM) | `0x00010000` | `212,984` (`0x33ff8`) | **`28,082`** (`0x6db2`) | `184,902` (`0x2d246`) | **13.19%** |
-| **Combined `FRAM + FRAM2`** | — | **`262,008`** (`262.0 KB`) | **`43,766`** (`43.8 KB`) | **`218,242`** (`218.2 KB`) | **16.70%** |
+| **`FRAM`** (Lower FRAM) | `0x00004000` | `49,024` (`0xbf80`) | **`15,858`** (`0x3df2`) | `33,166` (`0x818e`) | **32.35%** |
+| **`FRAM2`** (Upper FRAM) | `0x00010000` | `212,984` (`0x33ff8`) | **`29,808`** (`0x7470`) | `183,176` (`0x2cb88`) | **14.00%** |
+| **Combined `FRAM + FRAM2`** | — | **`262,008`** (`262.0 KB`) | **`45,666`** (`45.7 KB`) | **`216,342`** (`216.3 KB`) | **17.43%** |
 
 ### AI Subsystem Incremental Footprint Breakdown
 
 - **FRAM Weights (`.const`):** `609` bytes (`22 B` Heuristic A + `587 B` Tiny-MLP B).
-- **FRAM Inference Code (`.text:ga_select_action_q7`):** `2,864` bytes (`0x0b30` in `FRAM2`).
+- **FRAM Inference Code (`.text:ga_select_action_q7`):** `3,668` bytes (`0x0e54` in `FRAM2`).
 - **Static SRAM (`.bss`):** `32` bytes for the 16-entry recent-position ring buffer (`s_ai_hx[16]` at `0x22da`, `s_ai_hy[16]` at `0x22ea`) plus scalar mode flags (`s_ai_demo`, `s_ai_model`, `s_ai_hidx`).
 - **Stack Scratchpad:** `22 B` (`f[22]`) for Approach A or `40 B` (`x[24]` + `h[16]`) for Approach B, plus `11 B` (`valid[11]`).
 - **Dynamic Heap (`.sysmem`):** `0` bytes (`malloc` is never used).
@@ -136,7 +136,7 @@ All figures below are extracted directly from the MSP430 Linker (`PC v21.6.1`) o
 Stage 4 exposes the embedded policies directly inside the game's Class Select screen without requiring a host PC:
 
 1. **Launch:** At the Class Select menu, press **`4`** (`[4] AI DEMO (FRAM) Watch on-chip quantized Q7 GA play autonomously!`).
-2. **Autonomous Execution Loop:** The main firmware loop invokes `ga_select_action_q7()` every **500 ms** (`do_probe` tick, `app/dungeon_game.c:3586–3591`) and feeds the returned keypress directly into `handle_command()`, rendering every turn live over the 80×24 ANSI terminal.
+2. **Autonomous Execution Loop:** The main firmware loop invokes `ga_select_action_q7()` every **500 ms** (`do_probe` tick in `dungeon_game_process()`) and feeds the returned keypress directly into `handle_command_ex(..., true)`, rendering every turn live over the 80×24 ANSI terminal while keeping FRAM save/erase (`P`/`X`) disabled during AI Demo.
 3. **Live Model Hot-Swap (`T`):** Pressing **`T`** during AI Demo toggles `s_ai_model` on the fly between:
    - `HEURISTIC A (22B Q7)` (default on entry)
    - `TINY-MLP B (587B Q7)`

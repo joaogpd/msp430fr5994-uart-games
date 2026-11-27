@@ -1,6 +1,6 @@
 # Genetic Algorithm Benchmark & Hardware-in-the-Loop Experiments
 
-This document reports the complete empirical evaluation of the `feat/genetic-algorithm` subsystem in `mspgame`. All numbers are derived directly from the logged benchmark matrix (`ga/results/benchmark_summary.json`, 12 experiments totaling **2,021.39 s** of trainer wall-clock time / **2,026.94 s** end-to-end orchestration time across 10 worker processes) and live MSP430FR5994 Hardware-in-the-Loop telemetry (`ga/results/hil_knight_deep.json`).
+This document reports the complete empirical evaluation of the `feat/genetic-algorithm` subsystem in `mspgame`. All numbers are derived directly from the logged benchmark matrix (`ga/results/benchmark_summary.json`, 12 experiments totaling **2,021.39 s** of trainer wall-clock time / **2,026.94 s** end-to-end orchestration time across 10 worker processes) and live MSP430FR5994 Hardware-in-the-Loop telemetry (`ga/results/hil_knight_deep.json` and `ga/results/hil_mlp_deep.json`).
 
 ---
 
@@ -30,7 +30,7 @@ This document reports the complete empirical evaluation of the `feat/genetic-alg
 | `mlp_omni_knight_medium` | Tiny-MLP B | Omni | Knight | Medium | 36×50×5 | 110.62 | 2,253.2 | 4,124 | 3 | 468.0 | 1.0 / 1 | 1.4 | 447.7 | **95.66%** |
 | `heur_fair_arcanist_med` | Heuristic A | Fair | Arcanist | Medium | 36×50×5 | 137.11 | 7,939.4 | 10,720 | 5 | 1,985.9 | 1.7 / 3 | 3.9 | 2,291.4 | **115.38%** |
 | `mlp_fair_arcanist_med` | Tiny-MLP B | Fair | Arcanist | Medium | 36×50×5 | 68.83 | 1,479.0 | 4,406 | 3 | 542.6 | 1.0 / 1 | 0.7 | 541.6 | **99.82%** |
-| `heur_fair_rogue_med` | Heuristic A | Fair | Rogue | Medium | 36×50×5 | 146.29 | 9,489.4 | 13,252 | 6 | 3,059.4 | 1.8 / 3 | 5.7 | 3,068.6 | **100.30%** |
+| `heur_fair_rogue_med` | Heuristic A | Fair | Rogue | Medium | 36×50×5 | 146.30 | 9,489.4 | 13,252 | 6 | 3,059.4 | 1.8 / 3 | 5.7 | 3,068.6 | **100.30%** |
 | `mlp_fair_rogue_med` | Tiny-MLP B | Fair | Rogue | Medium | 36×50×5 | 106.10 | 3,327.8 | 4,964 | 2 | 2,261.4 | 1.1 / 2 | 1.5 | 2,261.4 | **100.00%** |
 
 *Note: `Wall (s)` reports `wall_clock_s` from the GA trainer (`2,021.39 s` total across all 12 runs; end-to-end `wall_s` including subprocess overhead is `2,026.94 s`). Boss kills were achieved on held-out seeds by `heur_fair_knight_deep` (1 boss kill, reaching Floor 6) and `heur_omni_knight_medium` (1 boss kill, reaching Floor 6), and on training seeds by `heur_fair_knight_medium` (2), `heur_fair_knight_deep` (3, reaching Floor 8), `heur_omni_knight_medium` (4), `heur_fair_arcanist_med` (1), and `heur_fair_rogue_med` (2).*
@@ -99,7 +99,7 @@ Comparing all three playable classes under the identical Medium Fair budget (`36
 Across all 12 benchmarked champions, symmetric Q7 `int8_t` quantization with 32-bit integer MAC accumulators preserves floating-point performance with virtually zero degradation:
 
 - **Overall (12 experiments):** Mean retention = **`101.08%`**, median = **`100.00%`**, range = **`95.66%` – `115.38%`**.
-- **Heuristic A (6 experiments):** Mean retention = **`102.55%`**, range = **`99.68%` – `115.38%`**. Three runs (`heur_fair_knight_smoke`, `heur_fair_knight_deep`, and both `mlp_fair_knight_medium` and `mlp_fair_rogue_med`) match Float32 to the exact decimal (`100.00%`).
+- **Heuristic A (6 experiments):** Mean retention = **`102.55%`**, range = **`99.68%` – `115.38%`**. Four runs (`heur_fair_knight_smoke`, `heur_fair_knight_deep`, `mlp_fair_knight_medium`, and `mlp_fair_rogue_med`) match Float32 to the exact decimal (`100.00%`).
 - **Tiny-MLP B (6 experiments):** Mean retention = **`99.60%`**, range = **`95.66%` – `102.00%`**.
 - **Why retention occasionally exceeds `100%`:** In discrete deterministic dungeon rollouts (e.g., `heur_fair_arcanist_med` at `115.38%`, `1,985.9` Float → `2,291.4` Q7), minor tie-breaking perturbations from Q7 rounding can flip a single action choice on one seed, leading to a slightly different combat/exploration trajectory that survives longer (`mean_turns` `120.5` → `137.8`, `mean_explored` `739.8` → `856.4`). Conversely, `mlp_omni_knight_medium` (`95.66%`) exhibits the largest drop due to a two-layer integer rounding shift (`h_shift`) altering marginal logit ties.
 
@@ -107,19 +107,19 @@ Across all 12 benchmarked champions, symmetric Q7 `int8_t` quantization with 32-
 
 ## 5. Live Hardware-in-the-Loop (HIL) Validation (`COM4 @ 115200`)
 
-To validate end-to-end execution against the physical TI MSP430FR5994 LaunchPad running the compiled ANSI/VT100 dungeon firmware, `ga/hil_eval.py` drove the live MCU over `COM4 @ 115200 baud` using the Deep Fair Knight Heuristic champion (`ga/results/heur_fair_knight_deep/best_genome.json`), parsing the live `80×24` ANSI terminal stream and transmitting keypresses turn-by-turn.
+To validate end-to-end execution against the physical TI MSP430FR5994 LaunchPad running the compiled ANSI/VT100 dungeon firmware, `ga/hil_eval.py` reconstructs a live Fair Fog-of-War `DungeonSim` proxy from the `80×24` ANSI terminal stream on `COM4 @ 115200 baud` and executes the actual saved Q7 `int8_t` champions (`HeuristicGenome` and `TinyMLPGenome`) turn-by-turn.
 
-Logged telemetry from `ga/results/hil_knight_deep.json`:
+Logged telemetry from `ga/results/hil_knight_deep.json` and `ga/results/hil_mlp_deep.json`:
 
-| Metric | Observed Value |
-| :--- | :--- |
-| **Serial Port / Baud Rate** | `COM4` @ `115200` baud |
-| **Evaluated Genome** | `ga/results/heur_fair_knight_deep/best_genome.json` |
-| **Autonomous Turns Completed** | `59` |
-| **Max Floor Reached** | `1` (`FL:01`, `BEST:01`, `SEED:350F`, `BIOME: STONE CRYPT`) |
-| **Max Gold Collected** | `6` |
-| **Deaths** | `0` |
-| **Low-HP Terminal Bell (`BEL`) Alerts** | `0` |
-| **Terminal Presence Probes (`DSR`) Handled** | `3` |
+| Metric | Heuristic A (`hil_knight_deep.json`) | Tiny-MLP B (`hil_mlp_deep.json`) |
+| :--- | :--- | :--- |
+| **Serial Port / Baud Rate** | `COM4` @ `115200` baud | `COM4` @ `115200` baud |
+| **Evaluated Genome** | `heur_fair_knight_deep/best_genome.json` (`Q7 int8`) | `mlp_fair_knight_deep/best_genome.json` (`Q7 int8`) |
+| **Autonomous Turns Completed** | `55` | `34` |
+| **Max Floor Reached** | `1` (`FL:01`, `SEED:9E6B`, `STONE CRYPT`) | `1` (`FL:01`, `SEED:9E6B`, `STONE CRYPT`) |
+| **Max Gold Collected** | `22` | `47` |
+| **Deaths** | `0` | `0` |
+| **Low-HP Terminal Bell (`BEL`) Alerts** | `0` | `0` |
+| **Terminal Presence Probes (`DSR`) Handled** | `1` | `2` |
 
-The live hardware session confirmed zero UART framing errors, zero crashes, clean handling of the firmware's periodic ANSI Device Status Report (`ESC[6n`) terminal-presence handshake (`dsr_count = 3`), and zero deaths across 59 real-time turns on the physical microcontroller.
+Both live hardware sessions confirmed zero UART framing errors, zero crashes, clean handling of the firmware's periodic ANSI Device Status Report (`ESC[5n`) terminal-presence handshake (`dsr_count = 1` and `2`), and zero deaths across real-time turns on the physical microcontroller.

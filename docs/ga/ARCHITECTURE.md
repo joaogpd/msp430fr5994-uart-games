@@ -20,7 +20,7 @@ flowchart LR
     end
 
     subgraph MCU["TI MSP430FR5994 Target"]
-        HDR["app/ga_weights.h\nconst int8_t in FRAM (.rodata)\n22 B (A) + 587 B (B)"]
+        HDR["app/ga_weights.h\nconst int8_t in FRAM (.const)\n22 B (A) + 587 B (B)"]
         FW["Firmware (app/dungeon_game.c)\n80x24 ANSI/VT100 Engine"]
     end
 
@@ -295,7 +295,7 @@ $$q_x = \operatorname{clip}\!\left(\operatorname{rint}(127 \cdot x),\,-127,\,127
 
 ### 8.4 FRAM C Header Export (`app/ga_weights.h`)
 
-`export_c_header(heuristic_genome, mlp_genome, out_path)` emits `static const int8_t` arrays that the TI MSP430 compiler places automatically into FRAM (`.rodata`), consuming **0 bytes of SRAM** for weights:
+`export_c_header(heuristic_genome, mlp_genome, out_path)` emits `static const int8_t` arrays that the TI MSP430 compiler places automatically into FRAM (`.const`), consuming **0 bytes of SRAM** for weights:
 
 - `GA_HEUR_WEIGHTS[22]`: **22 bytes**
 - `GA_MLP_W1[16][24]` (384 B) + `GA_MLP_B1[16]` (16 B) + `GA_MLP_W2[11][16]` (176 B) + `GA_MLP_B2[11]` (11 B): **587 bytes**
