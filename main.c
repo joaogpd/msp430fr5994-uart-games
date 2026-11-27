@@ -36,8 +36,9 @@ int main(void)
     /* 1. Safe pin & watchdog bring-up (configures S1/S2 falling-edge interrupts) */
     board_init(NULL);
 
-    /* 2. Configure 8 MHz DCO (MCLK/SMCLK) and 32.768 kHz LFXT (ACLK) */
+    /* 2. Configure 4 MHz DCO (MCLK/SMCLK) and 32.768 kHz LFXT (ACLK) */
     cs_config_t cs_cfg = CS_CONFIG_DEFAULT;
+    cs_cfg.dco = CS_DCO_4MHZ;
     (void)cs_init(&cs_cfg);
 
     /* 3. Route P2.0/P2.1 to eUSCI_A0 (SMCLK @ 115200 baud for snappy ANSI frames) */
@@ -66,7 +67,7 @@ int main(void)
     {
         dungeon_game_process();
 
-        /* Flush UART TX in LPM0 (avoids PMM31), then sleep in LPM3 when idle */
+        /* Flush UART TX in LPM0, then sleep in LPM1 @ 4 MHz when idle (PMM31-safe) */
         if (!dungeon_game_has_pending_work() && !uart_tx_idle(UART_A0))
         {
             (void)uart_flush(UART_A0);
@@ -74,7 +75,7 @@ int main(void)
         __disable_interrupt();
         if (!dungeon_game_has_pending_work())
         {
-            pmm_enter_lpm(uart_tx_idle(UART_A0) ? PMM_LPM3 : PMM_LPM0);
+            pmm_enter_lpm(uart_tx_idle(UART_A0) ? PMM_LPM1 : PMM_LPM0);
         }
         else
         {

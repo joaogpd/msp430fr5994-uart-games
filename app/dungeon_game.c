@@ -271,7 +271,7 @@ static bool on_led_off_timer(timer_id_t id)
     {
         board_led1(false);
     }
-    return false; /* Keep CPU in LPM3 without waking main() */
+    return false; /* Keep CPU in LPM1 without waking main() */
 }
 
 static void led1_set_solid(bool on)
