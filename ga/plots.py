@@ -1,6 +1,6 @@
 """
-Generate publication-quality Matplotlib figures (docs/ga/figures/*.png) and an
-interactive HTML fitness dashboard from ga/results/benchmark_summary.json.
+Generate publication-quality Matplotlib figures (docs/ga/figures/*.png)
+from ga/results/benchmark_summary.json.
 """
 from __future__ import annotations
 

@@ -72,6 +72,30 @@ class TestDungeonSimParity(unittest.TestCase):
         print(f"\n[BENCH] DungeonSim throughput: {tps:,.0f} turns/sec ({dt*1000:.1f} ms for {n} turns)")
         self.assertGreater(tps, 2000.0)
 
+    def test_quantized_int8_action_parity(self):
+        import numpy as np
+        from ga.genome import HeuristicGenome, TinyMLPGenome
+        from ga.sim import ACTIONS
+
+        rng = np.random.default_rng(7)
+        for cls_ctor in (HeuristicGenome, TinyMLPGenome):
+            g = cls_ctor.random(rng)
+            q = g.quantize_int8()
+            sim = DungeonSim(seed=0xA5CD, cls=CLASS_KNIGHT)
+            matches = 0
+            steps = 40
+            for _ in range(steps):
+                if sim.game_over:
+                    break
+                a_f = g.select_action(sim, omniscient=False)
+                a_q = q.select_action(sim, omniscient=False)
+                self.assertIn(a_f, ACTIONS)
+                self.assertIn(a_q, ACTIONS)
+                if a_f == a_q:
+                    matches += 1
+                sim.step(a_q)
+            self.assertGreaterEqual(matches / max(1, steps), 0.75)
+
 
 if __name__ == "__main__":
     unittest.main()
