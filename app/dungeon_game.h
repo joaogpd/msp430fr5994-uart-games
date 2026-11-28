@@ -62,6 +62,13 @@ typedef enum
     CLASS_ROGUE    = 2
 } dng_class_t;
 
+typedef enum
+{
+    DIFF_NORMAL = 0,
+    DIFF_EASY   = 1,
+    DIFF_HARD   = 2
+} dng_diff_t;
+
 /* Permanent relic bitmask */
 #define RELIC_VAMP          0x01u   /* Vampiric Fang: +1 HP on every enemy kill */
 #define RELIC_ARCANE        0x02u   /* Arcane Ring: +2 Max MP & +1 MP per floor */

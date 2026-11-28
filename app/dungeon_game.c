@@ -82,6 +82,10 @@ static const dng_enemy_def_t k_enemy_defs[7] = {
 
 static const char *const k_class_short[3] = { "KNT", "ARC", "ROG" };
 
+static const char *const k_diff_short[3] = { "NRM", "ESY", "HRD" };
+/* Cycles left-to-right across EASY -> NORMAL -> HARD -> EASY */
+static const uint8_t k_diff_next[3] = { DIFF_HARD, DIFF_NORMAL, DIFF_EASY };
+
 typedef struct
 {
     uint16_t gold;
@@ -89,7 +93,7 @@ typedef struct
     uint8_t  floor;
     uint8_t  cls;
     uint8_t  valid;
-    uint8_t  pad;
+    uint8_t  diff;
 } dng_hof_entry_t;
 
 /*
@@ -113,6 +117,7 @@ typedef struct
     uint8_t     py;
     uint8_t         dir;            /* 0=N, 1=E, 2=S, 3=W */
     uint8_t         cls;
+    uint8_t         diff;
     uint8_t         relics;
     uint8_t         empowered;
     uint8_t         has_saved_run;
@@ -183,6 +188,7 @@ static uint8_t       s_ai_hx[16];
 static uint8_t       s_ai_hy[16];
 static uint8_t       s_ai_hidx;
 static uint8_t       s_class;
+static uint8_t       s_diff = DIFF_NORMAL;
 static uint8_t       s_relics;
 static uint16_t      s_run_seed;
 static uint8_t       s_potions;
@@ -231,6 +237,13 @@ static void mix_entropy(uint16_t val)
 {
     s_entropy ^= val;
     s_entropy = (uint16_t)((s_entropy << 5) | (s_entropy >> 11)) ^ 0x9E37u;
+}
+
+static uint8_t potion_heal_amount(void)
+{
+    if (s_diff == DIFF_EASY) { return 8u; }
+    if (s_diff == DIFF_HARD) { return 5u; }
+    return 6u;
 }
 
 static uint8_t u8_abs_diff(uint8_t a, uint8_t b)
@@ -353,6 +366,7 @@ static void record_hall_of_fame(void)
             s_hof[i].floor = s_floor;
             s_hof[i].gold  = s_gold;
             s_hof[i].seed  = s_run_seed;
+            s_hof[i].diff  = s_diff;
             s_hof[i].cls   = s_class;
             s_hof[i].valid = 1u;
             break;
@@ -575,6 +589,7 @@ static bool commit_checkpoint(bool save_active_run)
     s_ckpt_stage.py            = s_py;
     s_ckpt_stage.dir           = s_dir;
     s_ckpt_stage.cls           = s_class;
+    s_ckpt_stage.diff          = s_diff;
     s_ckpt_stage.relics        = s_relics;
     s_ckpt_stage.empowered     = s_empowered ? 1u : 0u;
     s_ckpt_stage.has_saved_run = s_has_saved_run ? 1u : 0u;
@@ -619,6 +634,7 @@ static bool load_checkpoint(bool restore_full_run)
         s_py        = (s_ckpt_stage.py < DNG_H) ? s_ckpt_stage.py : 2u;
         s_dir       = s_ckpt_stage.dir & 0x03u;
         s_class     = (s_ckpt_stage.cls < 3u) ? s_ckpt_stage.cls : CLASS_KNIGHT;
+        s_diff      = (s_ckpt_stage.diff < 3u) ? s_ckpt_stage.diff : DIFF_NORMAL;
         s_relics    = s_ckpt_stage.relics;
         s_empowered = (s_ckpt_stage.empowered != 0u);
         s_potions   = s_ckpt_stage.potions;
@@ -784,17 +800,62 @@ static void place_secret_alcove(void)
     }
 }
 
-static void spawn_enemy(uint8_t slot, uint8_t x, uint8_t y, uint8_t type)
+static uint8_t enemy_scaled_dmg(uint8_t type)
 {
-    const dng_enemy_def_t *def = &k_enemy_defs[type];
-    uint8_t bonus_hp;
+    uint8_t base = k_enemy_defs[type].dmg;
+    uint8_t bonus = 0u;
+
     if (type == ENEMY_BOSS)
     {
-        bonus_hp = (s_floor > 5u) ? (uint8_t)(((s_floor - 5u) / 5u) * 6u) : 0u;
+        if (s_floor > 5u)
+        {
+            uint8_t tier = (uint8_t)((s_floor - 5u) / 5u);
+            uint8_t mult = (s_diff == DIFF_HARD) ? 3u : ((s_diff == DIFF_EASY) ? 1u : 2u);
+            bonus = (uint8_t)(tier * mult);
+        }
+    }
+    else if (s_diff == DIFF_HARD)
+    {
+        if (s_floor >= 2u) { bonus = (uint8_t)(s_floor / 2u); }
+    }
+    else if (s_diff == DIFF_EASY)
+    {
+        if (s_floor >= 4u) { bonus = (uint8_t)((s_floor - 1u) / 3u); }
     }
     else
     {
-        bonus_hp = (s_floor >= 4u) ? (uint8_t)((s_floor - 2u) / 2u) : 0u;
+        if (s_floor >= 3u) { bonus = (uint8_t)((s_floor - 1u) / 2u); }
+    }
+
+    uint16_t sum = (uint16_t)base + (uint16_t)bonus;
+    return (sum > 20u) ? 20u : (uint8_t)sum;
+}
+
+static void spawn_enemy(uint8_t slot, uint8_t x, uint8_t y, uint8_t type)
+{
+    const dng_enemy_def_t *def = &k_enemy_defs[type];
+    uint8_t bonus_hp = 0u;
+
+    if (type == ENEMY_BOSS)
+    {
+        if (s_floor > 5u)
+        {
+            uint8_t tier = (uint8_t)((s_floor - 5u) / 5u);
+            uint8_t step = (s_diff == DIFF_HARD) ? 10u : ((s_diff == DIFF_EASY) ? 6u : 8u);
+            bonus_hp = (uint8_t)(tier * step);
+        }
+    }
+    else if (s_diff == DIFF_HARD)
+    {
+        if (s_floor >= 2u) { bonus_hp = (uint8_t)((s_floor - 1u) + (s_floor / 3u)); }
+    }
+    else if (s_diff == DIFF_EASY)
+    {
+        if (s_floor >= 4u) { bonus_hp = (uint8_t)((s_floor - 2u) / 2u); }
+    }
+    else
+    {
+        if (s_floor >= 2u) { bonus_hp = (uint8_t)(s_floor - 1u); }
     }
 
     uint16_t hp_sum = (uint16_t)def->base_hp + (uint16_t)bonus_hp;
@@ -843,14 +904,20 @@ static void place_shop(void)
     uint8_t i, tries;
     uint8_t kinds[DNG_MAX_SHOP_ITEMS];
     uint8_t costs[DNG_MAX_SHOP_ITEMS];
-    uint8_t scale = (uint8_t)((s_floor <= 10u) ? (s_floor * 5u) : 50u);
+    uint16_t stat_scale = (s_floor <= 10u) ? (uint16_t)(s_floor * 15u) : 150u;
+    uint16_t cons_scale = (s_floor <= 10u) ? (uint16_t)(s_floor * 3u)  : 30u;
+    int16_t  stat_adj   = (s_diff == DIFF_HARD) ? 15 : ((s_diff == DIFF_EASY) ? -15 : 0);
+    int16_t  cons_adj   = (s_diff == DIFF_HARD) ? 5  : ((s_diff == DIFF_EASY) ? -5  : 0);
 
+    uint16_t c_atk = (uint16_t)((int16_t)(65u + stat_scale) + stat_adj);
+    uint16_t c_def = (uint16_t)((int16_t)(75u + stat_scale) + stat_adj);
     kinds[0] = SHOP_ATK;
-    costs[0] = (uint8_t)(25u + scale);
+    costs[0] = (c_atk > 250u) ? 250u : (uint8_t)c_atk;
     kinds[1] = SHOP_DEF;
-    costs[1] = (uint8_t)(30u + scale);
+    costs[1] = (c_def > 250u) ? 250u : (uint8_t)c_def;
     kinds[2] = (uint8_t)(SHOP_POT + (next_rand() % 3u)); /* Pot, Bomb, or Map */
-    costs[2] = (kinds[2] == SHOP_POT) ? 15u : ((kinds[2] == SHOP_BOMB) ? 20u : 18u);
+    uint16_t c_con = (uint16_t)((int16_t)(((kinds[2] == SHOP_BOMB) ? 30u : 25u) + cons_scale) + cons_adj);
+    costs[2] = (c_con > 250u) ? 250u : (uint8_t)c_con;
 
     for (i = 0u; i < DNG_MAX_SHOP_ITEMS; i++)
     {
@@ -1018,8 +1085,9 @@ static void generate_floor(void)
         place_shop();
     }
 
-    /* 4 Spike Traps per floor (hidden until within 2 tiles) */
-    for (i = 0u; i < 4u; i++)
+    /* Spike Traps per floor: 3 Easy / 4 Normal / 6 Hard */
+    uint8_t ntraps = (s_diff == DIFF_HARD) ? 6u : ((s_diff == DIFF_EASY) ? 3u : 4u);
+    for (i = 0u; i < ntraps; i++)
     {
         if (find_open_floor(&x, &y, 4u))
         {
@@ -1027,20 +1095,27 @@ static void generate_floor(void)
         }
     }
 
-    /* Items: 2 Potions, 2 Mana Crystals, 2 Chests */
-    for (i = 0u; i < 6u; i++)
+    /* Items: 1 Potion on Hard (2 otherwise), 2 Mana Crystals, 2 Chests */
+    uint8_t npots = (s_diff == DIFF_HARD) ? 1u : 2u;
+    uint8_t nitems = (uint8_t)(npots + 4u);
+    for (i = 0u; i < nitems; i++)
     {
         if (find_open_floor(&x, &y, 4u))
         {
-            if (i < 2u)      s_map[y][x] = DNG_POTION;
-            else if (i < 4u) s_map[y][x] = DNG_MANA;
-            else             s_map[y][x] = DNG_CHEST;
+            if (i < npots)                  s_map[y][x] = DNG_POTION;
+            else if (i < (uint8_t)(npots + 2u)) s_map[y][x] = DNG_MANA;
+            else                            s_map[y][x] = DNG_CHEST;
         }
     }
 
-    /* Spawn 7..14 enemies scaled by floor */
-    uint8_t count = (uint8_t)(6u + s_floor);
-    if (count > 14u) { count = 14u; }
+    /* Spawn enemies scaled by floor & difficulty (max 16 < DNG_MAX_ENEMIES=20) */
+    uint8_t base_cnt = (s_diff == DIFF_HARD) ? 7u  : ((s_diff == DIFF_EASY) ? 5u  : 6u);
+    uint8_t max_cnt  = (s_diff == DIFF_HARD) ? 16u : ((s_diff == DIFF_EASY) ? 12u : 14u);
+    uint8_t count    = (uint8_t)(base_cnt + s_floor);
+    if (count > max_cnt) { count = max_cnt; }
+
+    uint8_t mimic_fl  = (s_diff == DIFF_EASY) ? 3u : 2u;
+    uint8_t wraith_fl = (s_diff == DIFF_HARD) ? 2u : ((s_diff == DIFF_EASY) ? 4u : 3u);
 
     for (i = 0u; i < count; i++)
     {
@@ -1049,11 +1124,11 @@ static void generate_floor(void)
         uint8_t etype = ENEMY_SLIME;
         uint8_t roll = (uint8_t)(next_rand() % 10u);
 
-        if (i == (uint8_t)(count - 1u) && s_floor >= 2u)
+        if (i == (uint8_t)(count - 1u) && s_floor >= mimic_fl)
         {
-            etype = ENEMY_MIMIC; /* 1 Mimic disguised as a chest on Floor 2+ */
+            etype = ENEMY_MIMIC;
         }
-        else if (s_floor >= 3u && roll >= 8u)
+        else if (s_floor >= wraith_fl && roll >= 8u)
         {
             etype = ENEMY_WRAITH;
         }
@@ -1200,6 +1275,7 @@ void dungeon_game_init(void)
     s_low_hp_pulse       = false;
     s_low_hp_beep_ticks  = 0u;
     s_best_floor         = 1u;
+    s_diff               = DIFF_NORMAL;
     s_has_saved_run      = false;
 
     /* Normal reboot auto-resumes saved FRAM floor; hold S1 on boot for Floor 1 */
@@ -1509,7 +1585,8 @@ static void monster_turn(void)
                 if ((s_px == e->x || s_py == e->y) && dist <= 6u &&
                     clear_straight_line(e->x, e->y, s_px, s_py))
                 {
-                    damage_player(3u, "BONE WAVE SMASHES YOU FOR");
+                    uint8_t wave_dmg = (uint8_t)(enemy_scaled_dmg(ENEMY_BOSS) + ((s_diff == DIFF_HARD) ? 3u : 2u));
+                    damage_player(wave_dmg, "BONE WAVE SMASHES YOU FOR");
                 }
                 else
                 {
@@ -1578,7 +1655,7 @@ static void monster_turn(void)
                 }
                 if ((uint8_t)bx == s_px && (uint8_t)by == s_py)
                 {
-                    damage_player(k_enemy_defs[ENEMY_ARCHER].dmg, "ARCHER ARROW HITS FOR");
+                    damage_player(enemy_scaled_dmg(ENEMY_ARCHER), "ARCHER ARROW HITS FOR");
                     hit = true;
                     break;
                 }
@@ -1596,15 +1673,17 @@ static void monster_turn(void)
 
         if (dist > 8u) { continue; }
 
-        /* Adjacent melee attack */
+        /* Adjacent melee attack: */
         if (dist == 1u)
         {
             const dng_enemy_def_t *def = &k_enemy_defs[e->type];
-            damage_player(def->dmg, def->name);
+            uint8_t raw_dmg = enemy_scaled_dmg(e->type);
+            damage_player(raw_dmg, def->name);
             if (e->type == ENEMY_WRAITH && !s_game_over && s_mana > 0u)
             {
+                uint8_t eff_dmg = (raw_dmg > s_def) ? (uint8_t)(raw_dmg - s_def) : 1u;
                 s_mana--;
-                set_status("WRAITH CHILLS YOU (-1 HP & -1 MP)!");
+                set_status_combat("WRAITH CHILLS YOU:", "", eff_dmg, " DMG & -1 MP! (", s_hp, " HP LEFT)");
             }
             continue;
         }
@@ -1868,6 +1947,7 @@ static void use_potion(void)
         return;
     }
 
+    uint8_t heal = potion_heal_amount();
     s_potions--;
     s_hp = (uint8_t)(s_hp + 6u);
     if (s_hp > s_max_hp) { s_hp = s_max_hp; }
@@ -1878,7 +1958,7 @@ static void use_potion(void)
         led1_set_solid(false);
         s_full_redraw = true;
     }
-    set_status("DRANK HEALTH POTION (+6 HP)!");
+    set_status_combat("DRANK HEALTH POTION:", "", heal, " HP RESTORED!", 255u, "");
     monster_turn();
     s_dirty = true;
 }
@@ -2159,8 +2239,10 @@ static void step_in_direction(uint8_t dir)
     }
     else if (target == DNG_TRAP)
     {
+        uint8_t trap_dmg = (s_diff == DIFF_EASY) ? 2u
+                         : (uint8_t)(2u + (s_floor / ((s_diff == DIFF_HARD) ? 3u : 4u)));
         s_map[ny][nx] |= TILE_F_REVEALED;
-        damage_player(2u, "SPIKE TRAP PIERCES YOU FOR");
+        damage_player(trap_dmg, "SPIKE TRAP PIERCES YOU FOR");
         if (s_game_over) { s_dirty = true; return; }
     }
     else if (target == DNG_POTION)
@@ -2173,7 +2255,8 @@ static void step_in_direction(uint8_t dir)
         }
         else
         {
-            s_hp = (uint8_t)(s_hp + 6u);
+            uint8_t heal = potion_heal_amount();
+            s_hp = (uint8_t)(s_hp + heal);
             if (s_hp > s_max_hp) { s_hp = s_max_hp; }
             if (!is_low_hp() && s_was_low_hp)
             {
@@ -2182,7 +2265,7 @@ static void step_in_direction(uint8_t dir)
                 led1_set_solid(false);
                 s_full_redraw = true;
             }
-            set_status("BELT FULL - DRANK HEALTH POTION (+6 HP)!");
+            set_status_combat("BELT FULL - DRANK POTION:", "", heal, " HP RESTORED!", 255u, "");
         }
     }
     else if (target == DNG_MANA)
@@ -2194,8 +2277,14 @@ static void step_in_direction(uint8_t dir)
     }
     else if (target == DNG_CHEST)
     {
+        uint8_t fl_cap = (s_floor <= 10u) ? s_floor : 10u;
+        uint8_t chest_gold;
+        if (s_diff == DIFF_EASY)      { chest_gold = (uint8_t)(16u + (fl_cap * 2u)); }
+        else if (s_diff == DIFF_HARD) { chest_gold = (uint8_t)(8u  + fl_cap); }
+        else                          { chest_gold = (uint8_t)(10u + (fl_cap * 2u)); }
+
         set_tile_type(nx, ny, DNG_FLOOR);
-        s_gold = (uint16_t)(s_gold + 25u);
+        s_gold = (uint16_t)(s_gold + chest_gold);
         s_max_hp++;
         s_hp++;
         if (!is_low_hp() && s_was_low_hp)
@@ -2205,25 +2294,33 @@ static void step_in_direction(uint8_t dir)
             led1_set_solid(false);
             s_full_redraw = true;
         }
+
         uint8_t bonus = (uint8_t)(next_rand() & 0x03u);
-        if (bonus == 0u)
+        if (bonus == 0u && s_potions < 9u)
         {
-            s_atk++;
-            set_status("TREASURE CHEST! +25G, +1 MAX HP & +1 ATK!");
+            s_potions++;
+            set_status_combat("TREASURE CHEST!", "", chest_gold, "G, +1 MAX HP & +1 POT!", 255u, "");
         }
         else if (bonus == 1u && s_bombs < 9u)
         {
             s_bombs++;
-            set_status("TREASURE CHEST! +25G, +1 MAX HP & +1 BOMB (KEY 2)!");
+            set_status_combat("TREASURE CHEST!", "", chest_gold, "G, +1 MAX HP & +1 BOMB!", 255u, "");
         }
         else if (bonus == 2u && s_scrolls < 9u)
         {
             s_scrolls++;
-            set_status("TREASURE CHEST! +25G, +1 MAX HP & +1 MAPPING SCROLL (KEY 3)!");
+            set_status_combat("TREASURE CHEST!", "", chest_gold, "G, +1 MAX HP & +1 MAP!", 255u, "");
+        }
+        else if (s_mana < s_max_mana)
+        {
+            s_mana = (uint8_t)(s_mana + 2u);
+            if (s_mana > s_max_mana) { s_mana = s_max_mana; }
+            set_status_combat("TREASURE CHEST!", "", chest_gold, "G, +1 MAX HP & +2 MP!", 255u, "");
         }
         else
         {
-            set_status("TREASURE CHEST! +25G & +1 MAX HP!");
+            s_gold = (uint16_t)(s_gold + 8u);
+            set_status_combat("TREASURE CHEST!", "", (uint8_t)(chest_gold + 8u), "G & +1 MAX HP!", 255u, "");
         }
     }
     else if (target == DNG_RELIC)
@@ -2537,17 +2634,20 @@ static void render_top_banner(char *frame, uint16_t *pos, uint16_t cap)
         *pos = buf_put_u8_pad2(frame, *pos, cap, (uint8_t)s_best_floor);
         *pos = buf_puts(frame, *pos, cap, " SEED:");
         *pos = buf_put_hex16(frame, *pos, cap, s_run_seed);
+        *pos = buf_puts(frame, *pos, cap, " [");
+        *pos = buf_puts(frame, *pos, cap, k_diff_short[s_diff < 3u ? s_diff : 0u]);
+        *pos = buf_puts(frame, *pos, cap, "]");
         if (is_boss_floor(s_floor))
         {
-            *pos = buf_puts(frame, *pos, cap, "  BIOME: BOSS SANCTUM                    \x1b[0m");
+            *pos = buf_puts(frame, *pos, cap, "  BIOME: BOSS SANCTUM              \x1b[0m");
         }
         else if (is_cave_floor(s_floor))
         {
-            *pos = buf_puts(frame, *pos, cap, "  BIOME: FUNGAL CAVERNS                  \x1b[0m");
+            *pos = buf_puts(frame, *pos, cap, "  BIOME: FUNGAL CAVERNS            \x1b[0m");
         }
         else
         {
-            *pos = buf_puts(frame, *pos, cap, "  BIOME: STONE CRYPT                     \x1b[0m");
+            *pos = buf_puts(frame, *pos, cap, "  BIOME: STONE CRYPT               \x1b[0m");
         }
     }
     frame_flush_if_needed(frame, pos, cap);
@@ -2737,7 +2837,7 @@ static void render_sidebar_static_legend(char *frame, uint16_t *pos, uint16_t ca
 
 static void render_class_select_overlay(char *frame, uint16_t *pos, uint16_t cap)
 {
-    static const char *const k_cls[16] = {
+    static const char *const k_cls[13] = {
         " \x1b[1;33mCHOOSE YOUR HERO CLASS:\x1b[0m",
         " ",
         "   \x1b[1;32m[1] KNIGHT   (KNT)\x1b[0m  HP:16  MP:4  ATK:3  DEF:1  Belt: 1 Pot",
@@ -2750,10 +2850,7 @@ static void render_class_select_overlay(char *frame, uint16_t *pos, uint16_t cap
         "       +1 vision radius, spots traps at range 4, +2 CRIT on first strike!",
         " ",
         "   \x1b[1;33m[4] AI DEMO  (FRAM)\x1b[0m Watch on-chip quantized Q7 GA play autonomously!",
-        "       Press \x1b[1;37mT\x1b[0m during demo to switch Heuristic (22B) vs Tiny-MLP (587B).",
-        " ",
-        " \x1b[90m----------------------------------------------------------------------------\x1b[0m",
-        "   Press \x1b[1;37m1 / 2 / 3 / 4\x1b[0m  |  \x1b[1;37mR\x1b[0m: Load FRAM Save  |  \x1b[1;37mH\x1b[0m: Hall of Fame"
+        "       Press \x1b[1;37mT\x1b[0m during demo to switch Heuristic (22B) vs Tiny-MLP (587B)."
     };
     uint8_t i;
 
@@ -2761,12 +2858,30 @@ static void render_class_select_overlay(char *frame, uint16_t *pos, uint16_t cap
         "\x1b[2J\x1b[H\x1b[?25l\x1b[1;37;44m MSP430FR5994 DUNGEON CRAWLER                         NEW ADVENTURE             \x1b[0m");
     frame_flush_if_needed(frame, pos, cap);
 
-    for (i = 0u; i < 16u; i++)
+    for (i = 0u; i < 13u; i++)
     {
         *pos = buf_put_cup(frame, *pos, cap, (uint8_t)(i + 3u), 1u);
         *pos = buf_puts(frame, *pos, cap, k_cls[i]);
         frame_flush_if_needed(frame, pos, cap);
     }
+
+    *pos = buf_put_cup(frame, *pos, cap, 17u, 1u);
+    *pos = buf_puts(frame, *pos, cap, "   \x1b[1;37mDIFFICULTY:\x1b[0m ");
+    *pos = buf_puts(frame, *pos, cap, (s_diff == DIFF_EASY)   ? "\x1b[1;32m[EASY]\x1b[0m   " : "\x1b[90m EASY \x1b[0m   ");
+    *pos = buf_puts(frame, *pos, cap, (s_diff == DIFF_NORMAL) ? "\x1b[1;33m[NORMAL]\x1b[0m " : "\x1b[90m NORMAL \x1b[0m ");
+    *pos = buf_puts(frame, *pos, cap, (s_diff == DIFF_HARD)   ? "\x1b[1;31m[HARD]\x1b[0m   " : "\x1b[90m HARD \x1b[0m   ");
+    *pos = buf_puts(frame, *pos, cap, "\x1b[90m(Press D / Tab / S1)\x1b[0m");
+    frame_flush_if_needed(frame, pos, cap);
+
+    *pos = buf_put_cup(frame, *pos, cap, 19u, 1u);
+    *pos = buf_puts(frame, *pos, cap,
+        " \x1b[90m----------------------------------------------------------------------------\x1b[0m");
+    frame_flush_if_needed(frame, pos, cap);
+
+    *pos = buf_put_cup(frame, *pos, cap, 20u, 1u);
+    *pos = buf_puts(frame, *pos, cap,
+        "   \x1b[1;37m1-4\x1b[0m: Start  |  \x1b[1;37mD/Tab\x1b[0m: Difficulty  |  \x1b[1;37mR\x1b[0m: Load FRAM  |  \x1b[1;37mH\x1b[0m: Hall of Fame");
+    frame_flush_if_needed(frame, pos, cap);
 }
 
 static void render_hof_overlay(char *frame, uint16_t *pos, uint16_t cap)
@@ -2778,9 +2893,9 @@ static void render_hof_overlay(char *frame, uint16_t *pos, uint16_t cap)
     frame_flush_if_needed(frame, pos, cap);
 
     *pos = buf_put_cup(frame, *pos, cap, 3u, 4u);
-    *pos = buf_puts(frame, *pos, cap, "\x1b[1;33mRANK   CLASS   FLOOR   GOLD    SEED\x1b[0m");
+    *pos = buf_puts(frame, *pos, cap, "\x1b[1;33mRANK   CLASS   DIFF   FLOOR   GOLD    SEED\x1b[0m");
     *pos = buf_put_cup(frame, *pos, cap, 4u, 4u);
-    *pos = buf_puts(frame, *pos, cap, "\x1b[90m-------------------------------------\x1b[0m");
+    *pos = buf_puts(frame, *pos, cap, "\x1b[90m--------------------------------------------\x1b[0m");
     frame_flush_if_needed(frame, pos, cap);
 
     for (i = 0u; i < DNG_HOF_ENTRIES; i++)
@@ -2792,7 +2907,9 @@ static void render_hof_overlay(char *frame, uint16_t *pos, uint16_t cap)
         {
             *pos = buf_puts(frame, *pos, cap, "     ");
             *pos = buf_puts(frame, *pos, cap, k_class_short[s_hof[i].cls < 3u ? s_hof[i].cls : 0u]);
-            *pos = buf_puts(frame, *pos, cap, "     FL:");
+            *pos = buf_puts(frame, *pos, cap, "     ");
+            *pos = buf_puts(frame, *pos, cap, k_diff_short[s_hof[i].diff < 3u ? s_hof[i].diff : 0u]);
+            *pos = buf_puts(frame, *pos, cap, "    FL:");
             *pos = buf_put_u8_pad2(frame, *pos, cap, s_hof[i].floor);
             *pos = buf_puts(frame, *pos, cap, "   ");
             *pos = buf_put_u16_pad4(frame, *pos, cap, s_hof[i].gold);
@@ -2801,7 +2918,7 @@ static void render_hof_overlay(char *frame, uint16_t *pos, uint16_t cap)
         }
         else
         {
-            *pos = buf_puts(frame, *pos, cap, "     \x1b[90m---     --      ----    ----\x1b[0m");
+            *pos = buf_puts(frame, *pos, cap, "     \x1b[90m---     ---    --      ----    ----\x1b[0m");
         }
         frame_flush_if_needed(frame, pos, cap);
     }
@@ -3638,6 +3755,12 @@ static void handle_command_ex(uint8_t cmd, bool from_ai)
         else if (cmd == '4')
         {
             start_ai_demo();
+        }
+        else if (cmd == 'd' || cmd == 'D' || cmd == '\t' || cmd == CMD_ROTATE)
+        {
+            s_diff = k_diff_next[s_diff < 3u ? s_diff : 0u];
+            s_full_redraw = true;
+            s_dirty = true;
         }
         else if (cmd == 'r' || cmd == 'R')
         {
